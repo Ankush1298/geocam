@@ -8,35 +8,53 @@ import '../../models/geo_record.dart';
 import '../../services/hash_service.dart';
 
 class HistoryDetailPage extends StatefulWidget {
-  final GeoRecord record;
-  const HistoryDetailPage({super.key, required this.record});
+  final List<GeoRecord> records;
+  final int initialIndex;
+  const HistoryDetailPage({
+    super.key,
+    required this.records,
+    required this.initialIndex,
+  });
 
   @override
   State<HistoryDetailPage> createState() => _HistoryDetailPageState();
 }
 
 class _HistoryDetailPageState extends State<HistoryDetailPage> {
-  VideoPlayerController? _video;
-  /// `null` = not yet verified; `true` = OK; `false` = tampered / unknown.
-  bool? _verified;
+  late PageController _pageController;
+  late int _currentIndex;
+
+  // Per-page state caches
+  final Map<int, VideoPlayerController?> _videos = {};
+  final Map<int, bool?> _verified = {};
 
   @override
   void initState() {
     super.initState();
-    if (widget.record.isVideo) {
-      _video = VideoPlayerController.file(File(widget.record.stampedPath))
+    _currentIndex = widget.initialIndex;
+    _pageController = PageController(initialPage: widget.initialIndex);
+    _initPage(widget.initialIndex);
+  }
+
+  void _initPage(int index) {
+    if (index < 0 || index >= widget.records.length) return;
+    final record = widget.records[index];
+    if (record.isVideo && _videos[index] == null) {
+      final ctrl = VideoPlayerController.file(File(record.stampedPath))
         ..initialize().then((_) {
           if (mounted) setState(() {});
         });
+      _videos[index] = ctrl;
     }
-    _verifyIntegrity();
+    if (!_verified.containsKey(index)) {
+      _verifyIntegrity(index);
+    }
   }
 
-  Future<void> _verifyIntegrity() async {
-    final record = widget.record;
+  Future<void> _verifyIntegrity(int index) async {
+    final record = widget.records[index];
     if (record.hash.isEmpty) {
-      // Pre-signing record — cannot verify.
-      setState(() => _verified = null);
+      if (mounted) setState(() => _verified[index] = null);
       return;
     }
     final ok = await HashService.verify(
@@ -48,37 +66,42 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
       accuracy: record.accuracy,
       address: record.address,
     );
-    if (mounted) setState(() => _verified = ok);
+    if (mounted) setState(() => _verified[index] = ok);
   }
 
   @override
   void dispose() {
-    _video?.dispose();
+    _pageController.dispose();
+    for (final ctrl in _videos.values) {
+      ctrl?.dispose();
+    }
     super.dispose();
   }
 
-  Future<void> _export(BuildContext context) async {
-    final file = File(widget.record.stampedPath);
+  Future<void> _export(BuildContext context, GeoRecord record) async {
+    final file = File(record.stampedPath);
     final bytes = await file.readAsBytes();
-    await downloadFile(bytes, '${widget.record.id}.${widget.record.isVideo ? 'mp4' : 'jpg'}');
+    await downloadFile(bytes, '${record.id}.${record.isVideo ? 'mp4' : 'jpg'}');
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(widget.record.isVideo ? 'Video exported.' : 'Photo exported.')),
+        SnackBar(content: Text(record.isVideo ? 'Video exported.' : 'Photo exported.')),
       );
     }
   }
 
-  Widget _buildIntegrityBadge() {
-    final record = widget.record;
+  Widget _buildIntegrityBadge(int index) {
+    final record = widget.records[index];
+    final verified = _verified[index];
     if (record.hash.isEmpty) {
       return _badge(
         icon: Icons.lock_open,
         label: 'No signature',
         sublabel: 'Captured before signing was enabled',
         color: Colors.grey,
+        record: record,
       );
     }
-    if (_verified == null) {
+    if (!_verified.containsKey(index) || verified == null && record.hash.isNotEmpty) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 10),
         child: Row(children: [
@@ -88,12 +111,13 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
         ]),
       );
     }
-    if (_verified == true) {
+    if (verified == true) {
       return _badge(
         icon: Icons.verified_user,
         label: '✅ Data Verified',
         sublabel: 'Location, time & address match the original signature',
         color: Colors.greenAccent,
+        record: record,
       );
     }
     return _badge(
@@ -102,6 +126,7 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
       sublabel: 'The metadata does not match the original signature.\n'
           'Location, time or address may have been altered.',
       color: Colors.redAccent,
+      record: record,
     );
   }
 
@@ -110,6 +135,7 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
     required String label,
     required String sublabel,
     required Color color,
+    required GeoRecord record,
   }) {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 10),
@@ -132,10 +158,10 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
               const SizedBox(height: 3),
               Text(sublabel,
                   style: const TextStyle(fontSize: 12, color: Colors.white70)),
-              if (widget.record.hash.isNotEmpty) ...[
+              if (record.hash.isNotEmpty) ...[
                 const SizedBox(height: 6),
                 SelectableText(
-                  'SIG: ${widget.record.hash.length > 16 ? '${widget.record.hash.substring(0, 16)}...' : widget.record.hash}',
+                  'SIG: ${record.hash.length > 16 ? '${record.hash.substring(0, 16)}...' : record.hash}',
                   style: const TextStyle(
                       fontFamily: 'monospace', fontSize: 11, color: Colors.white54),
                 ),
@@ -147,66 +173,114 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
     );
   }
 
+  Widget _buildPage(BuildContext context, int index) {
+    final record = widget.records[index];
+    final video = _videos[index];
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: record.isVideo
+              ? (video?.value.isInitialized == true
+                  ? AspectRatio(
+                      aspectRatio: video!.value.aspectRatio,
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          VideoPlayer(video),
+                          IconButton.filled(
+                            iconSize: 34,
+                            onPressed: () {
+                              if (video.value.isPlaying) {
+                                video.pause();
+                              } else {
+                                video.play();
+                              }
+                              setState(() {});
+                            },
+                            icon: Icon(video.value.isPlaying ? Icons.pause : Icons.play_arrow),
+                          ),
+                        ],
+                      ),
+                    )
+                  : const SizedBox(height: 220, child: Center(child: CircularProgressIndicator())))
+              : Image.file(File(record.stampedPath)),
+        ),
+        const SizedBox(height: 16),
+        // ── Integrity badge ─────────────────────────────────────────────
+        _buildIntegrityBadge(index),
+        const SizedBox(height: 8),
+        Text('Capture details', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 8),
+        if (record.latitude != null) Text('Latitude: ${record.latitude!.toStringAsFixed(6)}'),
+        if (record.longitude != null) Text('Longitude: ${record.longitude!.toStringAsFixed(6)}'),
+        if (record.accuracy != null) Text('Accuracy: ±${record.accuracy!.round()} m'),
+        if (record.altitude != null) Text('Altitude: ${record.altitude!.toStringAsFixed(1)} m'),
+        Text('Captured: ${record.timestamp.toLocal()}'),
+        if (record.address.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(record.address, style: const TextStyle(color: Colors.white70)),
+        ],
+        const SizedBox(height: 18),
+        OutlinedButton.icon(
+          onPressed: () => _export(context, record),
+          icon: const Icon(Icons.download),
+          label: Text(record.isVideo ? 'Export stamped video' : 'Export stamped photo'),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final record = widget.record;
+    final total = widget.records.length;
+    final record = widget.records[_currentIndex];
     return Scaffold(
       appBar: AppBar(
-        title: Text(record.id),
-        actions: [IconButton(onPressed: () => _export(context), icon: const Icon(Icons.ios_share))],
+        title: Text('${_currentIndex + 1} / $total  •  ${record.id}'),
+        actions: [
+          IconButton(
+            onPressed: () => _export(context, record),
+            icon: const Icon(Icons.ios_share),
+          ),
+        ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+      body: Column(
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(14),
-            child: record.isVideo
-                ? (_video?.value.isInitialized == true
-                    ? AspectRatio(
-                        aspectRatio: _video!.value.aspectRatio,
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            VideoPlayer(_video!),
-                            IconButton.filled(
-                              iconSize: 34,
-                              onPressed: () {
-                                if (_video!.value.isPlaying) {
-                                  _video!.pause();
-                                } else {
-                                  _video!.play();
-                                }
-                                setState(() {});
-                              },
-                              icon: Icon(_video!.value.isPlaying ? Icons.pause : Icons.play_arrow),
-                            ),
-                          ],
-                        ),
-                      )
-                    : const SizedBox(height: 220, child: Center(child: CircularProgressIndicator())))
-                : Image.file(File(record.stampedPath)),
+          Expanded(
+            child: PageView.builder(
+              controller: _pageController,
+              itemCount: total,
+              onPageChanged: (index) {
+                setState(() => _currentIndex = index);
+                _initPage(index);
+              },
+              itemBuilder: (context, index) => _buildPage(context, index),
+            ),
           ),
-          const SizedBox(height: 16),
-          // ── Integrity badge ──────────────────────────────────────────────
-          _buildIntegrityBadge(),
-          const SizedBox(height: 8),
-          Text('Capture details', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 8),
-          if (record.latitude != null) Text('Latitude: ${record.latitude!.toStringAsFixed(6)}'),
-          if (record.longitude != null) Text('Longitude: ${record.longitude!.toStringAsFixed(6)}'),
-          if (record.accuracy != null) Text('Accuracy: ±${record.accuracy!.round()} m'),
-          if (record.altitude != null) Text('Altitude: ${record.altitude!.toStringAsFixed(1)} m'),
-          Text('Captured: ${record.timestamp.toLocal()}'),
-          if (record.address.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Text(record.address, style: const TextStyle(color: Colors.white70)),
-          ],
-          const SizedBox(height: 18),
-          OutlinedButton.icon(
-            onPressed: () => _export(context),
-            icon: const Icon(Icons.download),
-            label: Text(record.isVideo ? 'Export stamped video' : 'Export stamped photo'),
-          ),
+          // ── Page indicator dots ────────────────────────────────────────
+          if (total > 1)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(total, (i) {
+                  return AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: i == _currentIndex ? 18 : 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: i == _currentIndex
+                          ? Theme.of(context).colorScheme.primary
+                          : Colors.white30,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  );
+                }),
+              ),
+            ),
         ],
       ),
     );

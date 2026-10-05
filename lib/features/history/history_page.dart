@@ -66,7 +66,7 @@ class _HistoryPageState extends State<HistoryPage> {
                     return Card(
                       clipBehavior: Clip.antiAlias,
                       child: InkWell(
-                        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => HistoryDetailPage(record: record))),
+                        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => HistoryDetailPage(records: records, initialIndex: index))),
                         child: Padding(
                           padding: const EdgeInsets.all(10),
                           child: Row(children: [
