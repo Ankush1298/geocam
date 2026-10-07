@@ -17,7 +17,6 @@ class ResultPage extends StatefulWidget {
 
 class _ResultPageState extends State<ResultPage> {
   Uint8List? _processed;
-  Object? _processingError;
 
   @override
   void initState() {
@@ -25,10 +24,7 @@ class _ResultPageState extends State<ResultPage> {
     widget.result.processed.then((value) {
       if (!mounted) return;
       setState(() => _processed = value);
-    }).catchError((Object error) {
-      if (!mounted) return;
-      setState(() => _processingError = error);
-    });
+    }).catchError((_) {});
   }
 
   Future<void> _export(BuildContext context) async {
@@ -53,7 +49,13 @@ class _ResultPageState extends State<ResultPage> {
             child: InteractiveViewer(
               minScale: .5,
               maxScale: 4,
-              child: Center(child: Image.memory(_processed ?? result.original, fit: BoxFit.contain)),
+              // Front-camera raw bytes are still mirrored, so never show them:
+              // wait for the corrected photo. Back-camera raw is already correct.
+              child: Center(
+                child: _processed != null || !result.isFrontCamera
+                    ? Image.memory(_processed ?? result.original, fit: BoxFit.contain)
+                    : const CircularProgressIndicator(),
+              ),
             ),
           ),
           Container(

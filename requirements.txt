@@ -1,0 +1,5 @@
+Flask>=3.1,<4
+gunicorn>=23,<24
+cryptography>=45,<47
+psycopg[binary]>=3.2,<4
+boto3>=1.36,<2

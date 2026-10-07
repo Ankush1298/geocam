@@ -8,6 +8,7 @@ class StampSettings {
   bool showQr;
   bool qrMapLink;
   bool pixelEmbeddedStamps;
+  bool cloudVerification;
   String customText;
 
   StampSettings({
@@ -18,6 +19,7 @@ class StampSettings {
     this.showQr = true,
     this.qrMapLink = true,
     this.pixelEmbeddedStamps = true,
+    this.cloudVerification = true,
     this.customText = '',
   });
 
@@ -29,6 +31,7 @@ class StampSettings {
         showQr: showQr,
         qrMapLink: qrMapLink,
         pixelEmbeddedStamps: pixelEmbeddedStamps,
+        cloudVerification: cloudVerification,
         customText: customText,
       );
 
@@ -42,6 +45,7 @@ class StampSettings {
       showQr: p.getBool('stamp.qr') ?? true,
       qrMapLink: p.getBool('stamp.qrMapLink') ?? true,
       pixelEmbeddedStamps: p.getBool('stamp.pixelEmbedded') ?? true,
+      cloudVerification: p.getBool('stamp.cloudVerification') ?? true,
       customText: p.getString('stamp.custom') ?? '',
     );
   }
@@ -55,6 +59,7 @@ class StampSettings {
     await p.setBool('stamp.qr', showQr);
     await p.setBool('stamp.qrMapLink', qrMapLink);
     await p.setBool('stamp.pixelEmbedded', pixelEmbeddedStamps);
+    await p.setBool('stamp.cloudVerification', cloudVerification);
     await p.setString('stamp.custom', customText);
   }
 }

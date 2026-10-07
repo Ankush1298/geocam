@@ -27,8 +27,8 @@ class LocationService {
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.best,
           distanceFilter: 0,
+          timeLimit: Duration(seconds: 20),
         ),
-        timeLimit: const Duration(seconds: 20),
       );
     } on TimeoutException {
       return null;
@@ -46,8 +46,8 @@ class LocationService {
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.best,
           distanceFilter: 0,
+          timeLimit: Duration(seconds: 20),
         ),
-        timeLimit: const Duration(seconds: 20),
       );
     } on TimeoutException {
       return null;

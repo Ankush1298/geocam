@@ -10,6 +10,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../core/theme/app_theme.dart';
 import '../models/stamp_settings.dart';
 import '../models/camera_frame.dart';
+import 'sync_service.dart';
 
 class PhotoProcessor {
   Future<Uint8List> stamp({
@@ -21,11 +22,17 @@ class PhotoProcessor {
     required StampSettings settings,
     required CameraFrame frame,
     required double screenAspect,
-    String hash = '',
+    bool isFrontCamera = false,
   }) async {
     // Pixel-Embedded Stamp mode burns the location record into the actual
     // image pixels. EXIF can be stripped by messaging/social apps, but this
     // visible stamp remains part of the JPEG itself.
+    //
+    // IMPORTANT: CameraX already owns camera capture orientation. Do not
+    // horizontally flip front-camera stills here. The capture bytes are the
+    // canonical source for stamping, hashing, signing, storage and export.
+    // Applying an app-level front-camera flip here turns a correct capture
+    // into a mirrored photograph and makes a second flip appear to "fix" it.
     if (!settings.pixelEmbeddedStamps) return jpg;
 
     final codec = await ui.instantiateImageCodec(jpg);
@@ -75,11 +82,6 @@ class PhotoProcessor {
           : 'GPS accuracy: ±${position.accuracy.round()} m');
     }
     lines.add(recordId);
-    // Signature line — always shown so tampering is immediately visible.
-    if (hash.isNotEmpty) {
-      final shortHash = hash.length > 16 ? '${hash.substring(0, 16)}...' : hash;
-      lines.add('SIG: $shortHash');
-    }
 
     final outW = cropW;
     final outH = cropH;
@@ -93,51 +95,58 @@ class PhotoProcessor {
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
+    // CameraX owns capture orientation. Preserve the decoded camera image
+    // exactly as supplied; there is intentionally NO front-camera flip here.
+    // This keeps one source of truth from capture through the final signed
+    // media bytes and prevents a second mirror from being introduced by the
+    // application.
     canvas.drawImageRect(
       img,
       Rect.fromLTWH(cropLeft, cropTop, cropW, cropH),
       Rect.fromLTWH(0, 0, outW, outH),
       Paint(),
     );
-    canvas.drawRect(
-      Rect.fromLTWH(0, outH, outW, panelHeight),
-      Paint()..color = const Color(0xFF101214).withValues(alpha: .96),
-    );
-
-    final textMaxWidth = outW - (qrSize > 0 ? qrSize + 48 : 32);
-    for (var i = 0; i < lines.length; i++) {
-      final painter = TextPainter(
-        text: TextSpan(
-          text: lines[i],
-          style: TextStyle(
-            color: i == 0 ? AppTheme.amber : Colors.white,
-            fontSize: i == 0 ? lineHeight * .72 : lineHeight * .56,
-            fontWeight: i == 0 ? FontWeight.w700 : FontWeight.w400,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-        maxLines: 1,
-        ellipsis: '…',
-      )..layout(maxWidth: textMaxWidth);
-      painter.paint(canvas, Offset(18, outH + 14 + i * lineHeight));
-    }
-
-    if (settings.showQr) {
-      final qrLeft = outW - qrSize - 18;
-      final qrTop = outH + (panelHeight - qrSize) / 2;
-      drawQr(
-        canvas,
-        qrPayload(position, address, timestamp, recordId,
-            mapLink: settings.qrMapLink, hash: hash),
-        qrLeft,
-        qrTop,
-        qrSize,
+    if (settings.pixelEmbeddedStamps) {
+      canvas.drawRect(
+        Rect.fromLTWH(0, outH, outW, panelHeight),
+        Paint()..color = const Color(0xFF101214).withValues(alpha: .96),
       );
+
+      final textMaxWidth = outW - (qrSize > 0 ? qrSize + 48 : 32);
+      for (var i = 0; i < lines.length; i++) {
+        final painter = TextPainter(
+          text: TextSpan(
+            text: lines[i],
+            style: TextStyle(
+              color: i == 0 ? AppTheme.amber : Colors.white,
+              fontSize: i == 0 ? lineHeight * .72 : lineHeight * .56,
+              fontWeight: i == 0 ? FontWeight.w700 : FontWeight.w400,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+          maxLines: 1,
+          ellipsis: '…',
+        )..layout(maxWidth: textMaxWidth);
+        painter.paint(canvas, Offset(18, outH + 14 + i * lineHeight));
+      }
+
+      if (settings.showQr) {
+        final qrLeft = outW - qrSize - 18;
+        final qrTop = outH + (panelHeight - qrSize) / 2;
+        drawQr(
+          canvas,
+          qrPayload(position, address, timestamp, recordId,
+              mapLink: settings.qrMapLink),
+          qrLeft,
+          qrTop,
+          qrSize,
+        );
+      }
     }
 
     final output = await recorder.endRecording().toImage(
           outW.toInt(),
-          (outH + panelHeight).toInt(),
+          settings.pixelEmbeddedStamps ? (outH + panelHeight).toInt() : outH.toInt(),
         );
     final png = (await output.toByteData(format: ui.ImageByteFormat.png))!
         .buffer
@@ -216,7 +225,6 @@ class PhotoProcessor {
     DateTime timestamp,
     String recordId, {
     bool mapLink = true,
-    String hash = '',
   }) =>
       qrPayloadFor(
         lat: position?.latitude,
@@ -224,7 +232,6 @@ class PhotoProcessor {
         address: address,
         timestamp: timestamp,
         mapLink: mapLink,
-        hash: hash,
         recordId: recordId,
       );
 
@@ -235,16 +242,15 @@ class PhotoProcessor {
     required String address,
     required DateTime timestamp,
     bool mapLink = true,
-    String hash = '',
     String recordId = '',
   }) {
     // Return a verification URL (with signature appended so it's fully decentralized for this prototype)
     if (recordId.isNotEmpty) {
-      return 'https://weak-breads-roll.loca.lt/$recordId?sig=${Uri.encodeComponent(hash)}';
+      return '${SyncService.verificationBaseUrl}/$recordId';
     }
     
     // Fallback if no recordId
-    return 'https://verify.geocam.com/verify?sig=${Uri.encodeComponent(hash)}';
+    return '${SyncService.verificationBaseUrl}/';
   }
 
   static String formatDateTime(DateTime t) {

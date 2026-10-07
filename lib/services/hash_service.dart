@@ -1,132 +1,141 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-/// Provides Ed25519 asymmetric signing and verification for GeoCam photo records.
+/// Device-local Ed25519 identity and capture signing service.
 ///
-/// A random 32-byte seed is generated once per device installation and
-/// stored in SharedPreferences. This acts as the Private Key.
+/// The private seed is stored in platform secure storage. The server receives
+/// only the public key. A v2 signature covers the canonical capture metadata
+/// AND the SHA-256 digest of the final media bytes.
 class HashService {
-  static const _prefKey = 'geocam_ed25519_seed_v1';
-  
+  static const _seedKey = 'geocam_ed25519_seed_v2';
   static final _ed25519 = Ed25519();
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
 
-  /// Returns the persisted device seed (private key), creating it on first launch.
   static Future<List<int>> _getSeed() async {
-    final prefs = await SharedPreferences.getInstance();
-    final stored = prefs.getString(_prefKey);
+    final stored = await _storage.read(key: _seedKey);
     if (stored != null) {
-      return base64Decode(stored);
+      final seed = base64Decode(stored);
+      if (seed.length == 32) return seed;
     }
-    // Generate a cryptographically random 32-byte seed.
     final rng = Random.secure();
     final seed = List<int>.generate(32, (_) => rng.nextInt(256));
-    await prefs.setString(_prefKey, base64Encode(seed));
+    await _storage.write(key: _seedKey, value: base64Encode(seed));
     return seed;
   }
 
-  /// Builds the canonical UTF-8 message that is signed.
+  static Future<SimpleKeyPair> _keyPair() async {
+    return _ed25519.newKeyPairFromSeed(await _getSeed());
+  }
+
   static String _canonical({
     required String recordId,
+    required String mediaType,
     required DateTime timestamp,
     required double? latitude,
     required double? longitude,
     required double? accuracy,
+    required double? altitude,
     required String address,
+    required String mediaSha256,
   }) {
     final lat = latitude != null ? latitude.toStringAsFixed(6) : 'null';
     final lng = longitude != null ? longitude.toStringAsFixed(6) : 'null';
     final acc = accuracy != null ? accuracy.toStringAsFixed(1) : 'null';
+    final alt = altitude != null ? altitude.toStringAsFixed(1) : 'null';
+    final ts = timestamp.toUtc().toIso8601String();
     return [
+      'v=2',
       'id=$recordId',
-      'ts=${timestamp.toUtc().toIso8601String()}',
+      'type=$mediaType',
+      'ts=$ts',
       'lat=$lat',
       'lng=$lng',
       'acc=$acc',
-      'addr=$address',
+      'alt=$alt',
+      'addr64=${base64Encode(utf8.encode(address))}',
+      'media_sha256=$mediaSha256',
     ].join('|');
   }
 
-  /// Signs the record metadata and returns a Base64 signature.
+  static Future<String> sha256Bytes(Uint8List bytes) async =>
+      crypto.sha256.convert(bytes).toString();
+
+  static Future<String> sha256File(String path) async {
+    final digest = await crypto.sha256.bind(File(path).openRead()).first;
+    return digest.toString();
+  }
+
   static Future<String> sign({
     required String recordId,
+    required String mediaType,
     required DateTime timestamp,
     required double? latitude,
     required double? longitude,
     required double? accuracy,
+    required double? altitude,
     required String address,
+    required String mediaSha256,
   }) async {
-    final seed = await _getSeed();
-    final keyPair = await _ed25519.newKeyPairFromSeed(seed);
-    
+    final keyPair = await _keyPair();
     final msg = _canonical(
       recordId: recordId,
+      mediaType: mediaType,
       timestamp: timestamp,
       latitude: latitude,
       longitude: longitude,
       accuracy: accuracy,
+      altitude: altitude,
       address: address,
+      mediaSha256: mediaSha256,
     );
-    
-    final signature = await _ed25519.sign(
-      utf8.encode(msg),
-      keyPair: keyPair,
-    );
-    
-    // Return base64 encoded signature (approx 88 chars for 64 bytes)
+    final signature = await _ed25519.sign(utf8.encode(msg), keyPair: keyPair);
     return base64Encode(signature.bytes);
   }
 
-  /// Re-computes the key pair to extract public key and verifies the signature.
-  /// (In a real system, the public key would be distributed or embedded, but here
-  /// we verify locally just to check if the file was tampered with on-device).
   static Future<bool> verify({
     required String storedSignature,
+    required String publicKey,
     required String recordId,
+    required String mediaType,
     required DateTime timestamp,
     required double? latitude,
     required double? longitude,
     required double? accuracy,
+    required double? altitude,
     required String address,
+    required String mediaSha256,
   }) async {
-    if (storedSignature.isEmpty) return false;
-    
+    if (storedSignature.isEmpty || publicKey.isEmpty || mediaSha256.isEmpty) return false;
     try {
-      final seed = await _getSeed();
-      final keyPair = await _ed25519.newKeyPairFromSeed(seed);
-      final publicKey = await keyPair.extractPublicKey();
-      
+      final pub = SimplePublicKey(base64Decode(publicKey), type: KeyPairType.ed25519);
+      final signature = Signature(base64Decode(storedSignature), publicKey: pub);
       final msg = _canonical(
         recordId: recordId,
+        mediaType: mediaType,
         timestamp: timestamp,
         latitude: latitude,
         longitude: longitude,
         accuracy: accuracy,
+        altitude: altitude,
         address: address,
+        mediaSha256: mediaSha256,
       );
-      
-      final signatureBytes = base64Decode(storedSignature);
-      final signature = Signature(signatureBytes, publicKey: publicKey);
-      
-      final isVerified = await _ed25519.verify(
-        utf8.encode(msg),
-        signature: signature,
-      );
-      
-      return isVerified;
-    } catch (e) {
-      return false; // Invalid base64 or other error
+      return await _ed25519.verify(utf8.encode(msg), signature: signature);
+    } catch (_) {
+      return false;
     }
   }
 
-  /// Gets the public key in Base64 (could be useful for the verification server)
   static Future<String> getPublicKey() async {
-    final seed = await _getSeed();
-    final keyPair = await _ed25519.newKeyPairFromSeed(seed);
-    final publicKey = await keyPair.extractPublicKey();
+    final publicKey = await (await _keyPair()).extractPublicKey();
     return base64Encode(publicKey.bytes);
   }
 }

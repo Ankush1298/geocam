@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'package:http/http.dart' as http;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -18,6 +16,7 @@ import '../../services/location_service.dart';
 import '../../services/photo_processor.dart';
 import '../../services/video_processor.dart';
 import '../../services/record_id_service.dart';
+import '../../services/sync_service.dart';
 
 class VideoCaptureResult {
   final String originalPath;
@@ -46,7 +45,10 @@ class CaptureResult {
   final DateTime timestamp;
   final Position? position;
   final String address;
-  final String hash;
+  final String signature;
+  /// Front-camera raw bytes are mirrored until processed, so the result
+  /// screen must wait for [processed] instead of flashing [original].
+  final bool isFrontCamera;
 
   const CaptureResult({
     required this.original,
@@ -55,7 +57,8 @@ class CaptureResult {
     required this.timestamp,
     required this.position,
     required this.address,
-    this.hash = '',
+    this.signature = '',
+    this.isFrontCamera = false,
   });
 }
 
@@ -115,6 +118,10 @@ class GeoCameraController extends ChangeNotifier {
 
   bool get hasGoodGps => position != null && position!.accuracy <= 100;
 
+  bool get isFrontCamera =>
+      cameraIndex < cameras.length &&
+      cameras[cameraIndex].lensDirection == CameraLensDirection.front;
+
   double frameRatio(double screenAspect) {
     final selected = frame.ratio(screenAspect);
     if (selected != null) return selected;
@@ -127,6 +134,7 @@ class GeoCameraController extends ChangeNotifier {
 
   Future<void> initialize() async {
     settings = await StampSettings.load();
+    if (settings.cloudVerification) unawaited(SyncService.syncPending());
     frame = await CameraFrameSettings.load();
     await initializeCamera();
     await initializeLocation();
@@ -383,6 +391,7 @@ class GeoCameraController extends ChangeNotifier {
         timestamp: startedAt,
         recordId: recordId,
         settings: settings.copy(),
+        isFrontCamera: isFrontCamera,
       );
 
       notifyListeners();
@@ -425,138 +434,96 @@ class GeoCameraController extends ChangeNotifier {
     required DateTime timestamp,
     required String recordId,
     required StampSettings settings,
+    required bool isFrontCamera,
   }) async {
+    String finalPath = inputPath;
     try {
       await Future<void>.delayed(const Duration(milliseconds: 120));
-      final stampedPath = await videoProcessor.stampVideo(
-        inputPath: inputPath,
-        position: position,
-        address: address,
-        timestamp: timestamp,
-        recordId: recordId,
-        settings: settings,
+      try {
+        finalPath = await videoProcessor.stampVideo(
+          inputPath: inputPath, position: position, address: address,
+          timestamp: timestamp, recordId: recordId, settings: settings,
+          isFrontCamera: isFrontCamera,
+        );
+      } catch (_) { finalPath = inputPath; }
+
+      final mediaSha256 = await HashService.sha256File(finalPath);
+      final publicKey = await HashService.getPublicKey();
+      final signature = await HashService.sign(
+        recordId: recordId, mediaType: 'video', timestamp: timestamp,
+        latitude: position?.latitude, longitude: position?.longitude,
+        accuracy: position?.accuracy, altitude: position?.altitude,
+        address: address, mediaSha256: mediaSha256,
       );
-
-      // Save to the phone's shared Gallery FIRST. This copy is independent
-      // of GeoCam's private app storage and must survive app-history deletion.
-      await _saveVideoToGallery(stampedPath);
-
-      // Keep a separate permanent in-app copy as well. Deleting this record
-      // later only removes GeoCam's private copy; it never deletes the Gallery
-      // MediaStore item saved above.
+      await _saveVideoToGallery(finalPath);
       await HistoryStore.addVideo(
-        id: recordId,
-        stampedPath: stampedPath,
-        originalPath: inputPath,
-        timestamp: timestamp,
-        latitude: position?.latitude,
-        longitude: position?.longitude,
-        accuracy: position?.accuracy,
-        altitude: position?.altitude,
-        address: address,
+        id: recordId, stampedPath: finalPath, originalPath: inputPath,
+        timestamp: timestamp, latitude: position?.latitude, longitude: position?.longitude,
+        accuracy: position?.accuracy, altitude: position?.altitude, address: address,
+        signature: signature, mediaSha256: mediaSha256, publicKey: publicKey,
       );
-      final history = await HistoryStore.load();
-      final saved = history.firstWhere((r) => r.id == recordId);
-
+      final saved = (await HistoryStore.load()).firstWhere((r) => r.id == recordId);
+      if (settings.cloudVerification) unawaited(SyncService.sync(saved));
+      // HistoryStore now owns its own copy, so the camera/FFmpeg temporary
+      // files can always be removed after the record is committed.
+      if (finalPath != inputPath) { try { await File(finalPath).delete(); } catch (_) {} }
       try { await File(inputPath).delete(); } catch (_) {}
-      try { await File(stampedPath).delete(); } catch (_) {}
       return saved.stampedPath;
     } catch (_) {
-      // Never lose a recording because background watermarking failed.
+      try { await _saveVideoToGallery(finalPath); } catch (_) {}
       try {
-        await HistoryStore.addVideo(
-          id: recordId,
-          stampedPath: inputPath,
-          originalPath: inputPath,
-          timestamp: timestamp,
-          latitude: position?.latitude,
-          longitude: position?.longitude,
-          accuracy: position?.accuracy,
-          altitude: position?.altitude,
-          address: address,
+        final mediaSha256 = await HashService.sha256File(finalPath);
+        final publicKey = await HashService.getPublicKey();
+        final signature = await HashService.sign(
+          recordId: recordId, mediaType: 'video', timestamp: timestamp,
+          latitude: position?.latitude, longitude: position?.longitude,
+          accuracy: position?.accuracy, altitude: position?.altitude,
+          address: address, mediaSha256: mediaSha256,
         );
-        // Save the original recording independently to the phone Gallery.
-        // This remains even if the GeoCam record is deleted later.
-        await _saveVideoToGallery(inputPath);
-        final history = await HistoryStore.load();
-        final saved = history.firstWhere((r) => r.id == recordId);
+        await HistoryStore.addVideo(
+          id: recordId, stampedPath: finalPath, originalPath: inputPath,
+          timestamp: timestamp, latitude: position?.latitude, longitude: position?.longitude,
+          accuracy: position?.accuracy, altitude: position?.altitude, address: address,
+          signature: signature, mediaSha256: mediaSha256, publicKey: publicKey,
+        );
+        final saved = (await HistoryStore.load()).firstWhere((r) => r.id == recordId);
+        if (settings.cloudVerification) unawaited(SyncService.sync(saved));
+        if (finalPath != inputPath) { try { await File(finalPath).delete(); } catch (_) {} }
+        try { await File(inputPath).delete(); } catch (_) {}
         return saved.stampedPath;
-      } catch (_) {
-        try { await _saveVideoToGallery(inputPath); } catch (_) {}
-        return inputPath;
-      }
+      } catch (_) { return inputPath; }
     }
-  }
-
-  Future<void> _saveVideoToGallery(String path) async {
-    if (kIsWeb) return;
-    final granted = await Gal.requestAccess(toAlbum: true);
-    if (!granted) throw StateError('Gallery permission was not granted.');
-    await Gal.putVideo(path, album: 'GeoCam');
   }
 
   Future<CaptureResult?> capture({bool allowWeakGps = false, double? screenAspect}) async {
     final c = camera;
     if (c == null || !c.value.isInitialized || busy) return null;
+    if (position != null && position!.accuracy > 100 && !allowWeakGps) return null;
 
-    if (position != null && position!.accuracy > 100 && !allowWeakGps) {
-      return null;
-    }
-
-    // Only the real camera shutter/read is part of the critical path.
-    // Expensive stamping, QR rendering, compression, EXIF and history I/O
-    // start after the result screen can already render the captured JPEG.
     busy = true;
     notifyListeners();
-
     try {
       final shot = await c.takePicture();
-      final capturedAt = DateTime.now();
+      final capturedAt = DateTime.now().toUtc();
       final rawBytes = await shot.readAsBytes();
+      final front = isFrontCamera;
       final positionAtCapture = position;
       final addressAtCapture = address;
       final recordId = RecordIdService.create(capturedAt);
       final selectedFrame = frame;
       final selectedSettings = settings.copy();
-      final capturedScreenAspect =
-          screenAspect ?? c.value.aspectRatio;
-
-      // Compute the HMAC signature before processing so it can be embedded
-      // into the stamp panel, QR code, and the history index atomically.
-      final hash = await HashService.sign(
-        recordId: recordId,
-        timestamp: capturedAt,
-        latitude: positionAtCapture?.latitude,
-        longitude: positionAtCapture?.longitude,
-        accuracy: positionAtCapture?.accuracy,
-        address: addressAtCapture,
-      );
-
-      // Start processing without awaiting it. The result page receives the
-      // original camera image immediately and silently swaps in the stamped
-      // image when processing finishes.
+      final capturedScreenAspect = screenAspect ?? c.value.aspectRatio;
       final processed = _processCaptureInBackground(
-        shotPath: shot.path,
-        rawBytes: rawBytes,
-        position: positionAtCapture,
-        address: addressAtCapture,
-        timestamp: capturedAt,
-        recordId: recordId,
-        settings: selectedSettings,
-        frame: selectedFrame,
-        screenAspect: capturedScreenAspect,
-        hash: hash,
+        shotPath: shot.path, rawBytes: rawBytes, position: positionAtCapture,
+        address: addressAtCapture, timestamp: capturedAt, recordId: recordId,
+        settings: selectedSettings, frame: selectedFrame, screenAspect: capturedScreenAspect,
+        isFrontCamera: front,
       );
-
       lastCapture = capturedAt;
       return CaptureResult(
-        original: rawBytes,
-        processed: processed,
-        recordId: recordId,
-        timestamp: capturedAt,
-        position: positionAtCapture,
-        address: addressAtCapture,
-        hash: hash,
+        original: rawBytes, processed: processed, recordId: recordId,
+        timestamp: capturedAt, position: positionAtCapture, address: addressAtCapture,
+        isFrontCamera: front,
       );
     } catch (e) {
       _setMessage('Capture failed: $e');
@@ -571,7 +538,6 @@ class GeoCameraController extends ChangeNotifier {
     required Uint8List stamped,
     required Position? position,
     required String recordId,
-    String hash = '',
   }) async {
     if (kIsWeb || position == null) return stamped;
 
@@ -589,12 +555,6 @@ class GeoCameraController extends ChangeNotifier {
         'GPSAltitude': position.altitude.abs(),
         'GPSAltitudeRef': position.altitude >= 0 ? '0' : '1',
       });
-      // native_exif writeAttributes doesn't fully support all string tags generically,
-      // but writeAttribute can set UserComment. Let's try setting it safely.
-      // If the plugin has trouble with UserComment, we will just continue.
-      try {
-        await exif.writeAttribute('UserComment', 'GeoCam Signature: $hash');
-      } catch (_) {}
       await exif.close();
       return await file.readAsBytes();
     } catch (_) {
@@ -614,84 +574,40 @@ class GeoCameraController extends ChangeNotifier {
     required StampSettings settings,
     required CameraFrame frame,
     required double screenAspect,
-    String hash = '',
+    required bool isFrontCamera,
   }) async {
-    // Let Flutter paint the captured image before starting the expensive
-    // image pipeline. This keeps the camera/result transition responsive.
     await Future<void>.delayed(const Duration(milliseconds: 80));
-
     final stamped = await photoProcessor.stamp(
-      jpg: rawBytes,
-      position: position,
-      address: address,
-      timestamp: timestamp,
-      recordId: recordId,
-      settings: settings,
-      frame: frame,
-      screenAspect: screenAspect,
-      hash: hash,
+      jpg: rawBytes, position: position, address: address, timestamp: timestamp,
+      recordId: recordId, settings: settings, frame: frame, screenAspect: screenAspect,
+      isFrontCamera: isFrontCamera,
     );
-
-    // Write GPS EXIF to the FINAL stamped JPEG, not only the original camera
-    // file. This gives us both layers: a visible pixel-embedded stamp and
-    // machine-readable EXIF metadata.
     final stampedWithExif = await _embedExifGpsIntoStampedImage(
-      stamped: stamped,
-      position: position,
-      recordId: recordId,
-      hash: hash,
+      stamped: stamped, position: position, recordId: recordId,
     );
 
     if (!kIsWeb) {
-      // Phone Gallery is a shared MediaStore copy. Save it independently
-      // before touching GeoCam's private history so app deletion cannot affect it.
-      try {
-        await Gal.putImageBytes(
-          stampedWithExif,
-          album: 'GeoCam',
-          name: '$recordId.jpg',
-        );
-      } catch (_) {}
-
+      final mediaSha256 = await HashService.sha256Bytes(stampedWithExif);
+      final publicKey = await HashService.getPublicKey();
+      final signature = await HashService.sign(
+        recordId: recordId, mediaType: 'photo', timestamp: timestamp,
+        latitude: position?.latitude, longitude: position?.longitude,
+        accuracy: position?.accuracy, altitude: position?.altitude,
+        address: address, mediaSha256: mediaSha256,
+      );
+      try { await Gal.putImageBytes(stampedWithExif, album: 'GeoCam', name: '$recordId.jpg'); } catch (_) {}
       try {
         await HistoryStore.add(
-          id: recordId,
-          stamped: stampedWithExif,
-          original: rawBytes,
-          timestamp: timestamp,
-          latitude: position?.latitude,
-          longitude: position?.longitude,
-          accuracy: position?.accuracy,
-          altitude: position?.altitude,
-          address: address,
-          hash: hash,
+          id: recordId, stamped: stampedWithExif, original: rawBytes, timestamp: timestamp,
+          latitude: position?.latitude, longitude: position?.longitude, accuracy: position?.accuracy,
+          altitude: position?.altitude, address: address, signature: signature,
+          mediaSha256: mediaSha256, publicKey: publicKey,
         );
-      } catch (_) {}
-
-      try {
-        final pubKey = await HashService.getPublicKey();
-        final payload = jsonEncode({
-          'id': recordId,
-          'timestamp': timestamp.toIso8601String(),
-          'latitude': position?.latitude,
-          'longitude': position?.longitude,
-          'accuracy': position?.accuracy,
-          'altitude': position?.altitude,
-          'address': address,
-          'hash': hash,
-          'public_key': pubKey,
-        });
-        http.post(
-          Uri.parse('https://weak-breads-roll.loca.lt/sync'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Bypass-Tunnel-Reminder': 'true'
-          },
-          body: payload,
-        ).catchError((_) => http.Response('', 500));
+        final saved = (await HistoryStore.load()).firstWhere((r) => r.id == recordId);
+        if (settings.cloudVerification) unawaited(SyncService.sync(saved));
       } catch (_) {}
     }
-
+    try { await File(shotPath).delete(); } catch (_) {}
     return stampedWithExif;
   }
 
@@ -708,6 +624,13 @@ class GeoCameraController extends ChangeNotifier {
   void _setMessage(String value) {
     message = value;
     notifyListeners();
+  }
+
+  Future<void> _saveVideoToGallery(String path) async {
+    if (kIsWeb) return;
+    try {
+      await Gal.putVideo(path, album: 'GeoCam');
+    } catch (_) {}
   }
 
   @override

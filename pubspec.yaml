@@ -1,7 +1,7 @@
 name: geocam
 description: GeoCam - location-aware camera prototype.
 publish_to: none
-version: 0.6.20+29
+version: 0.8.0+33
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -14,7 +14,7 @@ dependencies:
   geocoding: ^3.0.0
   qr_flutter: ^4.1.0
   gal: ^2.3.3
-  ffmpeg_kit_flutter_new: ^4.6.2
+  ffmpeg_kit_flutter_new_min_gpl: ^2.6.7
   native_exif: ^0.6.0
   flutter_image_compress: ^2.3.0
   http: ^1.6.0
@@ -22,7 +22,16 @@ dependencies:
   cryptography: ^2.7.0
   path_provider: ^2.1.5
   shared_preferences: ^2.5.3
+  flutter_secure_storage: ^9.2.4
   video_player: ^2.10.1
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
 
 flutter:
   uses-material-design: true
+  assets:
+    - shorebird.yaml
+
+

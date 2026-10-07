@@ -65,3 +65,7 @@ DerivedData
 
 # MacOS
 *.DS_Store
+
+# Android / local generated files
+android/.gradle/
+android/local.properties

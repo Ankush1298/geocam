@@ -7,6 +7,13 @@ import 'package:path_provider/path_provider.dart';
 import '../models/geo_record.dart';
 
 class HistoryStore {
+  static Future<void> _writeQueue = Future<void>.value();
+
+  static Future<void> _enqueue(Future<void> Function() operation) {
+    final next = _writeQueue.then((_) => operation());
+    _writeQueue = next.catchError((_) {});
+    return next;
+  }
   static Future<Directory> _root() async {
     final base = await getApplicationSupportDirectory();
     final dir = Directory('${base.path}/geocam_records');
@@ -26,16 +33,25 @@ class HistoryStore {
       if (!await f.exists()) return <GeoRecord>[];
       final decoded = jsonDecode(await f.readAsString());
       if (decoded is! List) return <GeoRecord>[];
-      final records = decoded
-          .whereType<Map>()
-          .map((e) => GeoRecord.fromJson(Map<String, dynamic>.from(e)))
-          .where((r) => File(r.stampedPath).existsSync())
-          .toList();
+      final records = <GeoRecord>[];
+      for (final e in decoded.whereType<Map>()) {
+        try {
+          final r = GeoRecord.fromJson(Map<String, dynamic>.from(e));
+          if (await File(r.stampedPath).exists()) records.add(r);
+        } catch (_) {}
+      }
       records.sort((a, b) => b.timestamp.compareTo(a.timestamp));
       return records;
     } catch (_) {
       return <GeoRecord>[];
     }
+  }
+
+  static Future<void> _write(List<GeoRecord> records) async {
+    final f = await _indexFile();
+    final tmp = File('${f.path}.tmp');
+    await tmp.writeAsString(jsonEncode(records.map((r) => r.toJson()).toList()), flush: true);
+    await tmp.rename(f.path);
   }
 
   static Future<void> add({
@@ -48,38 +64,34 @@ class HistoryStore {
     required double? accuracy,
     required double? altitude,
     required String address,
-    String hash = '',
+    required String signature,
+    required String mediaSha256,
+    required String publicKey,
+    String syncStatus = 'pending',
   }) async {
     if (kIsWeb) return;
     final dir = await _root();
     final stampedPath = '${dir.path}/$id-stamped.jpg';
-    final originalPath = '${dir.path}/$id-original.jpg';
+    // Keep only the final stamped media in app storage. The permanent
+    // Gallery copy is handled separately by `gal`; retaining a second full
+    // original doubles storage usage on low-storage devices.
+    final originalPath = stampedPath;
     await File(stampedPath).writeAsBytes(stamped, flush: true);
-    await File(originalPath).writeAsBytes(original, flush: true);
-
-    final current = await load();
-    current.insert(
-      0,
-      GeoRecord(
-        id: id,
-        stampedPath: stampedPath,
-        originalPath: originalPath,
-        timestamp: timestamp,
-        latitude: latitude,
-        longitude: longitude,
-        accuracy: accuracy,
-        altitude: altitude,
-        address: address,
-        hash: hash,
-      ),
-    );
-
-    final trimmed = current.take(100).toList();
-    final f = await _indexFile();
-    await f.writeAsString(
-      jsonEncode(trimmed.map((r) => r.toJson()).toList()),
-      flush: true,
-    );
+    await _enqueue(() => _insertAndTrim(GeoRecord(
+      id: id,
+      stampedPath: stampedPath,
+      originalPath: originalPath,
+      timestamp: timestamp,
+      latitude: latitude,
+      longitude: longitude,
+      accuracy: accuracy,
+      altitude: altitude,
+      address: address,
+      signature: signature,
+      mediaSha256: mediaSha256,
+      publicKey: publicKey,
+      syncStatus: syncStatus,
+    )));
   }
 
   static Future<void> addVideo({
@@ -92,61 +104,78 @@ class HistoryStore {
     required double? accuracy,
     required double? altitude,
     required String address,
-    String hash = '',
+    required String signature,
+    required String mediaSha256,
+    required String publicKey,
+    String syncStatus = 'pending',
   }) async {
     if (kIsWeb) return;
     final dir = await _root();
     final stampedCopy = File('${dir.path}/$id-stamped.mp4');
-    final originalCopy = File('${dir.path}/$id-original.mp4');
+    // Keep one in-app copy. The phone Gallery has its own independent copy.
     await File(stampedPath).copy(stampedCopy.path);
-    if (File(originalPath).existsSync()) {
-      await File(originalPath).copy(originalCopy.path);
-    } else {
-      await stampedCopy.copy(originalCopy.path);
-    }
+    final originalCopy = stampedCopy;
+    await _enqueue(() => _insertAndTrim(GeoRecord(
+      id: id,
+      stampedPath: stampedCopy.path,
+      originalPath: originalCopy.path,
+      mediaType: 'video',
+      timestamp: timestamp,
+      latitude: latitude,
+      longitude: longitude,
+      accuracy: accuracy,
+      altitude: altitude,
+      address: address,
+      signature: signature,
+      mediaSha256: mediaSha256,
+      publicKey: publicKey,
+      syncStatus: syncStatus,
+    )));
+  }
 
+  static Future<void> _insertAndTrim(GeoRecord record) async {
     final current = await load();
-    current.insert(
-      0,
-      GeoRecord(
-        id: id,
-        stampedPath: stampedCopy.path,
-        originalPath: originalCopy.path,
-        mediaType: 'video',
-        timestamp: timestamp,
-        latitude: latitude,
-        longitude: longitude,
-        accuracy: accuracy,
-        altitude: altitude,
-        address: address,
-        hash: hash,
-      ),
-    );
-
+    current.removeWhere((r) => r.id == record.id);
+    current.insert(0, record);
     final trimmed = current.take(100).toList();
-    final f = await _indexFile();
-    await f.writeAsString(
-      jsonEncode(trimmed.map((r) => r.toJson()).toList()),
-      flush: true,
-    );
+    final removed = current.skip(100).toList();
+    for (final r in removed) {
+      try { await File(r.stampedPath).delete(); } catch (_) {}
+      try { await File(r.originalPath).delete(); } catch (_) {}
+    }
+    await _write(trimmed);
+  }
+
+  static Future<void> updateSyncStatus(String id, String status) async {
+    await _enqueue(() async {
+      final current = await load();
+      final index = current.indexWhere((r) => r.id == id);
+      if (index < 0) return;
+      final r = current[index];
+      current[index] = GeoRecord(
+        id: r.id, stampedPath: r.stampedPath, originalPath: r.originalPath,
+        mediaType: r.mediaType, timestamp: r.timestamp, latitude: r.latitude,
+        longitude: r.longitude, accuracy: r.accuracy, altitude: r.altitude,
+        address: r.address, signature: r.signature, mediaSha256: r.mediaSha256,
+        publicKey: r.publicKey, syncStatus: status,
+      );
+      await _write(current);
+    });
   }
 
   static Future<void> delete(GeoRecord record) async {
-    // IMPORTANT: Never delete from the phone Gallery here. Gallery media is
-    // stored in Android's shared MediaStore and intentionally survives
-    // deletion of the corresponding GeoCam history record.
-    try {
-      final stamped = File(record.stampedPath);
-      final original = File(record.originalPath);
-      if (await stamped.exists()) await stamped.delete();
-      if (await original.exists()) await original.delete();
-      final current = await load();
-      current.removeWhere((r) => r.id == record.id);
-      final f = await _indexFile();
-      await f.writeAsString(
-        jsonEncode(current.map((r) => r.toJson()).toList()),
-        flush: true,
-      );
-    } catch (_) {}
+    if (kIsWeb) return;
+    await _enqueue(() async {
+      try {
+        final stamped = File(record.stampedPath);
+        final original = File(record.originalPath);
+        if (await stamped.exists()) await stamped.delete();
+        if (await original.exists()) await original.delete();
+        final current = await load();
+        current.removeWhere((r) => r.id == record.id);
+        await _write(current);
+      } catch (_) {}
+    });
   }
+
 }

@@ -1,47 +1,29 @@
-# GeoCam (Flutter prototype)
+# GeoCam
 
-## Setup
-```bash
-flutter create --org com.yourname --project-name geocam .
-# then overwrite lib/main.dart and pubspec.yaml with the ones here
-flutter pub get          # or: flutter pub upgrade --major-versions
-```
+GeoCam is a location-aware Android camera with local cryptographic integrity records and optional public QR verification.
 
-## Android
-1. `android/app/build.gradle(.kts)`: set `minSdk = 24`
-2. `android/app/src/main/AndroidManifest.xml`, inside `<manifest>`:
-```xml
-<uses-permission android:name="android.permission.CAMERA"/>
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
-```
+## What changed in v0.7
 
-## iOS (`ios/Runner/Info.plist`)
-```xml
-<key>NSCameraUsageDescription</key><string>Take geotagged photos</string>
-<key>NSLocationWhenInUseUsageDescription</key><string>Add your location to photos</string>
-<key>NSPhotoLibraryAddUsageDescription</key><string>Save photos to your gallery</string>
-```
+- Ed25519 private key moved out of ordinary preferences into Android secure storage.
+- Server no longer contains a device private key.
+- Photos and videos are both cryptographically signed.
+- The signature covers the exact final media SHA-256 digest.
+- QR codes identify a record instead of embedding the signature, avoiding a circular hash/signature dependency.
+- Server receives the exact media and independently computes its SHA-256.
+- Server verifies both media integrity and Ed25519 signature on every public verification.
+- Offline captures remain usable locally and retry synchronization later.
+- Local history has serialized writes and removes files belonging to records trimmed from the 100-record limit.
+- Cloud verification can be disabled in Settings.
+- Server storage uses SQLite + media files instead of an in-memory dictionary/JSON-only database.
 
-## Run
-`flutter run --release` on a real phone (camera + GPS do not work on most emulators).
-
-## What it saves (album "GeoCam")
-1. Original photo, untouched pixels, GPS written into EXIF.
-2. Stamped copy: same full-resolution photo + strip below with coordinates, address, time, accuracy and a QR code (JPEG 95%).
-
-## Android v0.5.1 GPS fix
-The Android build includes camera, fine-location and coarse-location permissions. GeoCam requests location while the app is in use and does not request background location. If the camera opens but GPS remains unavailable, turn on Android Location, allow GeoCam to use Location while using the app, then tap `Retry GPS` in the camera screen.
-
-## Android GPS fix (v0.5.1)
-The Android build includes camera, fine-location and coarse-location permissions. GeoCam requests location while the app is in use and does not request background location. If GPS remains unavailable, turn on Android Location, allow GeoCam to use Location while using the app, then tap `Retry GPS` in the camera screen.
+See `HOW_TO_RUN.md` for Android APK and server deployment instructions.
 
 
-## v0.6.6 camera controls
-- Video shutter starts recording immediately on finger-down; no long-press delay.
-- Release after a hold stops a short clip; a quick tap starts/stops normal video recording.
-- Sliding up/down while holding the shutter zooms with one hand.
-- Sliding vertically on the preview zooms in both photo and video modes.
-- Video recording uses the native camera audio path.
-- Video watermark processing remains in the background.
+## Offline-first capture and lightweight Android builds
+
+- Every capture is committed to GeoCam local history before cloud synchronization is required.
+- A server outage changes sync state to `failed`/pending; it does not fail the capture.
+- Pending records retry while the app is active and again when the app resumes or restarts.
+- The app keeps one in-app stamped-media copy instead of duplicating the original, while the independent GeoCam phone Gallery copy remains untouched by deleting GeoCam history.
+- The Gallery screen uses a 3-column media grid with photo thumbnails, video first-frame thumbnails, refresh, timestamps, and sync indicators.
+- `build_apk.sh` uses `--split-per-abi` so a device-specific APK is much smaller than a universal APK. It also writes debug symbols separately.

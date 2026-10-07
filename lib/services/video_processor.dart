@@ -2,8 +2,8 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_new/return_code.dart';
+import 'package:ffmpeg_kit_flutter_new_min_gpl/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min_gpl/return_code.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:path_provider/path_provider.dart';
@@ -32,8 +32,9 @@ class VideoProcessor {
     required DateTime timestamp,
     required String recordId,
     required StampSettings settings,
+    bool isFrontCamera = false,
   }) async {
-    if (!settings.pixelEmbeddedStamps) return inputPath;
+    if (!settings.pixelEmbeddedStamps && !isFrontCamera) return inputPath;
 
     // Determine the real pixel width of the video so the panel is rendered
     // at the same resolution — identical to how photo_processor.dart works.
@@ -59,15 +60,23 @@ class VideoProcessor {
     // The panel PNG is already the exact same width as the video, so we only
     // need to pad the video vertically and overlay — no scaling at all.
     // This is the same approach as the photo processor (panel appended below).
-    final command = [
+    // Front-camera video gets the same single un-mirror as photos.
+    final flip = isFrontCamera ? 'hflip,' : '';
+    final filter = settings.pixelEmbeddedStamps
+        ? '[0:v]${flip}pad=iw:ih+${panel.panelPixelHeight}:0:0:color=black[padded];[padded][1:v]overlay=0:H-h:format=auto[v]'
+        : '[0:v]hflip[v]';
+
+    final commandArgs = [
       '-y',
       '-i', input,
-      '-i', overlayFile,
-      '-filter_complex',
-      '[0:v]pad=iw:ih+${panel.panelPixelHeight}:0:0:color=black[padded];'
-      '[padded][1:v]overlay=0:H-h:format=auto[v]',
+      if (settings.pixelEmbeddedStamps) ...['-i', overlayFile],
+      '-filter_complex', filter,
       '-map', '[v]',
       '-map', '0:a?',
+    ];
+
+    final command = [
+      ...commandArgs,
       '-c:v', 'libx264',
       '-preset', 'veryfast',
       '-crf', '20',

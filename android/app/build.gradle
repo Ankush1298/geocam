@@ -10,11 +10,11 @@ android {
     compileSdk 36
 
     defaultConfig {
-        applicationId 'com.example.geocam'
+        applicationId 'com.geocam.camera'
         minSdk 24
         targetSdk 36
-        versionCode 12
-        versionName '0.6.2'
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
     }
 
     compileOptions {

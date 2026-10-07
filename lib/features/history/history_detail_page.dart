@@ -10,6 +10,7 @@ import '../../services/hash_service.dart';
 class HistoryDetailPage extends StatefulWidget {
   final List<GeoRecord> records;
   final int initialIndex;
+
   const HistoryDetailPage({
     super.key,
     required this.records,
@@ -24,57 +25,16 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
   late PageController _pageController;
   late int _currentIndex;
 
-  // Per-page state caches
-  final Map<int, VideoPlayerController?> _videos = {};
-  final Map<int, bool?> _verified = {};
-
   @override
   void initState() {
     super.initState();
     _currentIndex = widget.initialIndex;
-    _pageController = PageController(initialPage: widget.initialIndex);
-    _initPage(widget.initialIndex);
-  }
-
-  void _initPage(int index) {
-    if (index < 0 || index >= widget.records.length) return;
-    final record = widget.records[index];
-    if (record.isVideo && _videos[index] == null) {
-      final ctrl = VideoPlayerController.file(File(record.stampedPath))
-        ..initialize().then((_) {
-          if (mounted) setState(() {});
-        });
-      _videos[index] = ctrl;
-    }
-    if (!_verified.containsKey(index)) {
-      _verifyIntegrity(index);
-    }
-  }
-
-  Future<void> _verifyIntegrity(int index) async {
-    final record = widget.records[index];
-    if (record.hash.isEmpty) {
-      if (mounted) setState(() => _verified[index] = null);
-      return;
-    }
-    final ok = await HashService.verify(
-      storedSignature: record.hash,
-      recordId: record.id,
-      timestamp: record.timestamp,
-      latitude: record.latitude,
-      longitude: record.longitude,
-      accuracy: record.accuracy,
-      address: record.address,
-    );
-    if (mounted) setState(() => _verified[index] = ok);
+    _pageController = PageController(initialPage: _currentIndex);
   }
 
   @override
   void dispose() {
     _pageController.dispose();
-    for (final ctrl in _videos.values) {
-      ctrl?.dispose();
-    }
     super.dispose();
   }
 
@@ -89,19 +49,111 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
     }
   }
 
-  Widget _buildIntegrityBadge(int index) {
-    final record = widget.records[index];
-    final verified = _verified[index];
-    if (record.hash.isEmpty) {
+  @override
+  Widget build(BuildContext context) {
+    if (widget.records.isEmpty) return const Scaffold();
+    final record = widget.records[_currentIndex];
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(record.id),
+        actions: [
+          IconButton(
+            onPressed: () => _export(context, record),
+            icon: const Icon(Icons.ios_share),
+          )
+        ],
+      ),
+      body: PageView.builder(
+        controller: _pageController,
+        itemCount: widget.records.length,
+        onPageChanged: (index) {
+          setState(() {
+            _currentIndex = index;
+          });
+        },
+        itemBuilder: (context, index) {
+          return HistoryDetailItem(
+            record: widget.records[index],
+            onExport: () => _export(context, widget.records[index]),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class HistoryDetailItem extends StatefulWidget {
+  final GeoRecord record;
+  final VoidCallback onExport;
+
+  const HistoryDetailItem({super.key, required this.record, required this.onExport});
+
+  @override
+  State<HistoryDetailItem> createState() => _HistoryDetailItemState();
+}
+
+class _HistoryDetailItemState extends State<HistoryDetailItem> {
+  VideoPlayerController? _video;
+  bool? _verified;
+  bool? _mediaHashMatches;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.record.isVideo) {
+      _video = VideoPlayerController.file(File(widget.record.stampedPath))
+        ..initialize().then((_) {
+          if (mounted) setState(() {});
+        });
+    }
+    _verifyIntegrity();
+  }
+
+  Future<void> _verifyIntegrity() async {
+    final record = widget.record;
+    if (!record.hasCryptographicProof) {
+      if (mounted) setState(() { _verified = null; _mediaHashMatches = null; });
+      return;
+    }
+    try {
+      final actualHash = await HashService.sha256File(record.stampedPath);
+      final mediaOk = actualHash == record.mediaSha256;
+      final signatureOk = await HashService.verify(
+        storedSignature: record.signature,
+        publicKey: record.publicKey,
+        recordId: record.id,
+        mediaType: record.mediaType,
+        timestamp: record.timestamp,
+        latitude: record.latitude,
+        longitude: record.longitude,
+        accuracy: record.accuracy,
+        altitude: record.altitude,
+        address: record.address,
+        mediaSha256: record.mediaSha256,
+      );
+      if (mounted) setState(() { _mediaHashMatches = mediaOk; _verified = mediaOk && signatureOk; });
+    } catch (_) {
+      if (mounted) setState(() { _mediaHashMatches = false; _verified = false; });
+    }
+  }
+
+  @override
+  void dispose() {
+    _video?.dispose();
+    super.dispose();
+  }
+
+  Widget _buildIntegrityBadge() {
+    final record = widget.record;
+    if (!record.hasCryptographicProof) {
       return _badge(
         icon: Icons.lock_open,
         label: 'No signature',
         sublabel: 'Captured before signing was enabled',
         color: Colors.grey,
-        record: record,
       );
     }
-    if (!_verified.containsKey(index) || verified == null && record.hash.isNotEmpty) {
+    if (_verified == null) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 10),
         child: Row(children: [
@@ -111,22 +163,20 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
         ]),
       );
     }
-    if (verified == true) {
+    if (_verified == true) {
       return _badge(
         icon: Icons.verified_user,
         label: '✅ Data Verified',
-        sublabel: 'Location, time & address match the original signature',
+        sublabel: 'Media bytes and signed capture metadata match.',
         color: Colors.greenAccent,
-        record: record,
       );
     }
     return _badge(
       icon: Icons.gpp_bad,
       label: '❌ Tampered / Invalid',
-      sublabel: 'The metadata does not match the original signature.\n'
-          'Location, time or address may have been altered.',
+      sublabel: 'The saved media or signed capture metadata does not match.\n'
+          'The record should not be treated as verified.',
       color: Colors.redAccent,
-      record: record,
     );
   }
 
@@ -135,7 +185,6 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
     required String label,
     required String sublabel,
     required Color color,
-    required GeoRecord record,
   }) {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 10),
@@ -158,10 +207,10 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
               const SizedBox(height: 3),
               Text(sublabel,
                   style: const TextStyle(fontSize: 12, color: Colors.white70)),
-              if (record.hash.isNotEmpty) ...[
+              if (widget.record.signature.isNotEmpty) ...[
                 const SizedBox(height: 6),
                 SelectableText(
-                  'SIG: ${record.hash.length > 16 ? '${record.hash.substring(0, 16)}...' : record.hash}',
+                  'SIG: ${widget.record.signature.length > 16 ? '${widget.record.signature.substring(0, 16)}...' : widget.record.signature}',
                   style: const TextStyle(
                       fontFamily: 'monospace', fontSize: 11, color: Colors.white54),
                 ),
@@ -173,33 +222,33 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
     );
   }
 
-  Widget _buildPage(BuildContext context, int index) {
-    final record = widget.records[index];
-    final video = _videos[index];
+  @override
+  Widget build(BuildContext context) {
+    final record = widget.record;
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         ClipRRect(
           borderRadius: BorderRadius.circular(14),
           child: record.isVideo
-              ? (video?.value.isInitialized == true
+              ? (_video?.value.isInitialized == true
                   ? AspectRatio(
-                      aspectRatio: video!.value.aspectRatio,
+                      aspectRatio: _video!.value.aspectRatio,
                       child: Stack(
                         alignment: Alignment.center,
                         children: [
-                          VideoPlayer(video),
+                          VideoPlayer(_video!),
                           IconButton.filled(
                             iconSize: 34,
                             onPressed: () {
-                              if (video.value.isPlaying) {
-                                video.pause();
+                              if (_video!.value.isPlaying) {
+                                _video!.pause();
                               } else {
-                                video.play();
+                                _video!.play();
                               }
                               setState(() {});
                             },
-                            icon: Icon(video.value.isPlaying ? Icons.pause : Icons.play_arrow),
+                            icon: Icon(_video!.value.isPlaying ? Icons.pause : Icons.play_arrow),
                           ),
                         ],
                       ),
@@ -208,9 +257,12 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
               : Image.file(File(record.stampedPath)),
         ),
         const SizedBox(height: 16),
-        // ── Integrity badge ─────────────────────────────────────────────
-        _buildIntegrityBadge(index),
-        const SizedBox(height: 8),
+        // ── Integrity badge ──────────────────────────────────────────────
+        _buildIntegrityBadge(),
+        if (_mediaHashMatches != null) ...[
+          Text('Media SHA-256: ${widget.record.mediaSha256}', style: const TextStyle(fontFamily: 'monospace', fontSize: 10, color: Colors.white54)),
+          const SizedBox(height: 8),
+        ],
         Text('Capture details', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 8),
         if (record.latitude != null) Text('Latitude: ${record.latitude!.toStringAsFixed(6)}'),
@@ -224,65 +276,11 @@ class _HistoryDetailPageState extends State<HistoryDetailPage> {
         ],
         const SizedBox(height: 18),
         OutlinedButton.icon(
-          onPressed: () => _export(context, record),
+          onPressed: widget.onExport,
           icon: const Icon(Icons.download),
           label: Text(record.isVideo ? 'Export stamped video' : 'Export stamped photo'),
         ),
       ],
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final total = widget.records.length;
-    final record = widget.records[_currentIndex];
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('${_currentIndex + 1} / $total  •  ${record.id}'),
-        actions: [
-          IconButton(
-            onPressed: () => _export(context, record),
-            icon: const Icon(Icons.ios_share),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: PageView.builder(
-              controller: _pageController,
-              itemCount: total,
-              onPageChanged: (index) {
-                setState(() => _currentIndex = index);
-                _initPage(index);
-              },
-              itemBuilder: (context, index) => _buildPage(context, index),
-            ),
-          ),
-          // ── Page indicator dots ────────────────────────────────────────
-          if (total > 1)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(total, (i) {
-                  return AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    margin: const EdgeInsets.symmetric(horizontal: 4),
-                    width: i == _currentIndex ? 18 : 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: i == _currentIndex
-                          ? Theme.of(context).colorScheme.primary
-                          : Colors.white30,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  );
-                }),
-              ),
-            ),
-        ],
-      ),
     );
   }
 }

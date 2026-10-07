@@ -57,6 +57,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
           _switch('QR code', 'Machine-readable GeoCam location record', settings.showQr, (v) => setState(() => settings.showQr = v)),
           _switch('Map link in QR', 'Tap-to-open Maps link inside the QR (turn off for a less dense QR)', settings.qrMapLink, (v) => setState(() => settings.qrMapLink = v)),
           _switch('Pixel-Embedded Stamp', 'Burn location, date/time and QR into the photo/video pixels', settings.pixelEmbeddedStamps, (v) => setState(() => settings.pixelEmbeddedStamps = v)),
+          _switch('Cloud verification', 'Upload the signed media to the GeoCam server so friends can verify it from the QR', settings.cloudVerification, (v) => setState(() => settings.cloudVerification = v)),
           const SizedBox(height: 10),
           TextField(
             controller: customController,

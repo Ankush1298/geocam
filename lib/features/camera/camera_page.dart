@@ -23,7 +23,6 @@ class CameraPage extends StatefulWidget {
 class _CameraPageState extends State<CameraPage> {
   late final GeoCameraController controller;
   bool _videoMode = false;
-  double _gestureStartZoom = 1.0;
   Timer? _recordTimer;
   Timer? _holdStartTimer;
   Duration _recorded = Duration.zero;
@@ -83,6 +82,7 @@ class _CameraPageState extends State<CameraPage> {
       if (!proceed) return;
     }
 
+    if (!mounted) return;
     final size = MediaQuery.sizeOf(context);
     final result = await controller.capture(
       allowWeakGps: true,
@@ -260,9 +260,7 @@ class _CameraPageState extends State<CameraPage> {
     _shootPhoto();
   }
 
-  void _onPreviewPointerDown(PointerDownEvent event) {
-    _gestureStartZoom = controller.zoom;
-  }
+  void _onPreviewPointerDown(PointerDownEvent event) {}
 
   void _onPreviewPointerMove(PointerMoveEvent event) {
     if (!controller.initialized || controller.isVideoRecording) return;
@@ -390,7 +388,7 @@ class _CameraPageState extends State<CameraPage> {
                   ]),
                 ),
                 const Spacer(),
-                _TopButton(icon: Icons.photo_library_outlined, tooltip: 'History', onPressed: _openHistory),
+                _TopButton(icon: Icons.photo_library_outlined, tooltip: 'Gallery', onPressed: _openHistory),
                 _TopButton(icon: Icons.tune, tooltip: 'Stamp settings', onPressed: _openSettings),
                 _TopButton(icon: controller.flashOn ? Icons.flash_on : Icons.flash_off, tooltip: 'Flash', onPressed: ready ? controller.toggleFlash : null),
                 _TopButton(icon: Icons.crop_free, tooltip: 'Frame', onPressed: ready ? _openFramePicker : null),
@@ -504,7 +502,7 @@ class _CameraPageState extends State<CameraPage> {
                       ),
                     ),
                   ),
-                  IconButton(tooltip: 'History', iconSize: 30, onPressed: _openHistory, icon: const Icon(Icons.collections_outlined)),
+                  IconButton(tooltip: 'Gallery', iconSize: 30, onPressed: _openHistory, icon: const Icon(Icons.collections_outlined)),
                 ]),
                 if (_videoMode && !recording)
                   const Padding(
