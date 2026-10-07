@@ -33,7 +33,7 @@ class PhotoProcessor {
     // canonical source for stamping, hashing, signing, storage and export.
     // Applying an app-level front-camera flip here turns a correct capture
     // into a mirrored photograph and makes a second flip appear to "fix" it.
-    if (!settings.pixelEmbeddedStamps) return jpg;
+    if (!settings.pixelEmbeddedStamps && !isFrontCamera) return jpg;
 
     final codec = await ui.instantiateImageCodec(jpg);
     final decodedFrame = await codec.getNextFrame();
@@ -100,12 +100,22 @@ class PhotoProcessor {
     // This keeps one source of truth from capture through the final signed
     // media bytes and prevents a second mirror from being introduced by the
     // application.
+    if (isFrontCamera) {
+      canvas.save();
+      canvas.translate(outW, 0);
+      canvas.scale(-1, 1);
+    }
+
     canvas.drawImageRect(
       img,
       Rect.fromLTWH(cropLeft, cropTop, cropW, cropH),
       Rect.fromLTWH(0, 0, outW, outH),
       Paint(),
     );
+
+if (isFrontCamera) {
+  canvas.restore();
+}
     if (settings.pixelEmbeddedStamps) {
       canvas.drawRect(
         Rect.fromLTWH(0, outH, outW, panelHeight),
