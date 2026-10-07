@@ -49,12 +49,17 @@ class _ResultPageState extends State<ResultPage> {
             child: InteractiveViewer(
               minScale: .5,
               maxScale: 4,
-              // Front-camera raw bytes are still mirrored, so never show them:
-              // wait for the corrected photo. Back-camera raw is already correct.
               child: Center(
-                child: _processed != null || !result.isFrontCamera
-                    ? Image.memory(_processed ?? result.original, fit: BoxFit.contain)
-                    : const CircularProgressIndicator(),
+                child: Transform(
+                  alignment: Alignment.center,
+                  transform: _processed == null && result.isFrontCamera
+                      ? Matrix4.diagonal3Values(-1.0, 1.0, 1.0)
+                      : Matrix4.identity(),
+                  child: Image.memory(
+                    _processed ?? result.original,
+                    fit: BoxFit.contain,
+                  ),
+                ),
               ),
             ),
           ),
