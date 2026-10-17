@@ -396,3 +396,98 @@ def test_20_rate_limit(monkeypatch):
     codes = [_client().get("/api/record/GC-NOPE-1").status_code for _ in range(5)]
     assert codes[-1] == 429
     _app._rate_hits.clear()
+
+
+GOLDEN_V3 = ("v=3|id=GC-GOLD-1|type=photo|ts=2026-10-03T16:12:10.574280Z|lat=25.033919|"
+             "lng=74.634770|acc=50.8|alt=383.3|addr64=VGVzdCwgSW5kaWE=|media_sha256=" + "ab" * 32 +
+             "|img=3024x4032|fp_version=1|fp_sha256=" + "cd" * 32)
+
+
+def test_21_canonical_matches_dart_golden_vector():
+    """Same literal is asserted in test/fingerprint_service_test.dart (HashService)."""
+    rec = {"protocolVersion": 3, "id": "GC-GOLD-1", "mediaType": "photo",
+           "timestamp": "2026-10-03T16:12:10.574280Z", "latitude": 25.033919,
+           "longitude": 74.634770, "accuracy": 50.8, "altitude": 383.3, "address": "Test, India",
+           "mediaSha256": "ab" * 32, "imageDimensions": "3024x4032", "fpVersion": 1,
+           "fpSha256": "cd" * 32}
+    assert canonical(rec).decode() == GOLDEN_V3
+
+
+def test_22_v3_record_verifies_after_storage():
+    private = _gen_key()
+    manifest = json.dumps({"gridRows": 1, "gridCols": 1, "regions": ["a" * 64]}, sort_keys=True)
+    rec = _make_record(private, record_id="GC-PRIV-T22", proto=3, fp_version=1,
+                       fp_sha256=hashlib.sha256(manifest.encode()).hexdigest(),
+                       image_dimensions="10x10", region_fingerprints=manifest)
+    assert _post_register(rec).status_code == 200
+    assert _client().get("/api/record/GC-PRIV-T22").get_json()["signatureValid"] is True
+    assert "Invalid Signature" not in _client().get("/GC-PRIV-T22").get_data(as_text=True)
+
+
+def _signed_with_manifest(record_id, manifest):
+    rec = _make_record(_gen_key(), record_id=record_id, proto=3, fp_version=1,
+                       fp_sha256=hashlib.sha256(manifest.encode()).hexdigest(),
+                       image_dimensions="10x10", region_fingerprints=manifest)
+    return _post_register(rec)
+
+
+def test_23_malformed_or_oversized_manifest_rejected():
+    big = json.dumps({"gridRows": 1000, "gridCols": 1000, "regions": ["a" * 64] * 10})
+    assert _signed_with_manifest("GC-PRIV-T23A", big).status_code == 400
+    assert _signed_with_manifest("GC-PRIV-T23B", "not json").status_code == 400
+    mismatch = json.dumps({"gridRows": 2, "gridCols": 2, "regions": ["a" * 64]})
+    assert _signed_with_manifest("GC-PRIV-T23C", mismatch).status_code == 400
+    assert _signed_with_manifest("GC-PRIV-T23D", json.dumps(
+        {"gridRows": 1, "gridCols": 1, "regions": ["zz"]})).status_code == 400
+
+
+def test_24_concurrent_insert_race_is_idempotent_or_409(monkeypatch):
+    private = _gen_key()
+    rec = _make_record(private, record_id="GC-PRIV-T24")
+    assert _post_register(rec).status_code == 200
+    monkeypatch.setattr(_app.store, "get_record", lambda _id, _c=[0]: (
+        _c.append(1) or (None if len(_c) == 2 else _app.store.__class__.get_record(_app.store, _id))))
+    monkeypatch.setattr(_app.store, "put_metadata", lambda r: False)
+    resp = _post_register(rec)
+    assert resp.status_code == 200 and resp.get_json().get("alreadyExists") is True
+
+
+def test_25_forged_forwarded_for_cannot_bypass_rate_limit(monkeypatch):
+    monkeypatch.setattr(_app, "_RATE_LIMIT", 2)
+    _app._rate_hits.clear()
+    codes = [_client().get("/api/record/GC-NOPE-2",
+                           headers={"X-Forwarded-For": f"1.2.3.{i}, 9.9.9.9"}).status_code
+             for i in range(4)]
+    assert codes[-1] == 429
+    _app._rate_hits.clear()
+
+
+def test_26_register_works_on_pre_privacy_sqlite_schema(tmp_path):
+    import sqlite3
+    import storage
+    db = tmp_path / "old.sqlite3"
+    with sqlite3.connect(db) as c:
+        c.execute("""CREATE TABLE records (id TEXT PRIMARY KEY, protocol_version INTEGER NOT NULL,
+            timestamp TEXT NOT NULL, latitude REAL, longitude REAL, accuracy REAL, altitude REAL,
+            address TEXT NOT NULL, media_type TEXT NOT NULL, signature TEXT NOT NULL,
+            media_sha256 TEXT NOT NULL, public_key TEXT NOT NULL, media_path TEXT NOT NULL,
+            created_at TEXT NOT NULL)""")
+    store = storage.LocalStore(str(tmp_path), str(db))
+    rec = _make_record(_gen_key(), record_id="GC-PRIV-T26")
+    assert store.put_metadata(rec) is True
+    assert store.get_record("GC-PRIV-T26")["media_sha256"] == rec["mediaSha256"]
+
+
+def test_27_oversized_address_rejected():
+    rec = _make_record(_gen_key(), record_id="GC-PRIV-T27")
+    rec["address"] = "x" * 2000
+    assert _post_register(rec).status_code == 400
+
+
+def test_28_public_page_makes_no_pixel_or_identity_claims():
+    assert _post_register(_make_record(_gen_key(), record_id="GC-PRIV-T28")).status_code == 200
+    page = _client().get("/GC-PRIV-T28").get_data(as_text=True)
+    assert "does not confirm that the image you received is unmodified" in page
+    assert "registered device" not in page
+    for banned in ("unmodified</", "not cropped", "pixels match", "authentic photo"):
+        assert banned not in page.lower()

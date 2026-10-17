@@ -130,3 +130,9 @@ Serialized manifest size for an $8 \times 8$ grid:
 - `/api/record/<id>` returns the signed capture fields **including location**, because the app verifies the Ed25519 signature itself instead of trusting the server. The public HTML page never shows location. A location-free signature format (v4) would remove this exposure.
 - The app trusts region fingerprints only if they hash to the signed `fpSha256`. The grid check is pixel-exact: resized, rotated or recompressed copies are reported as modified, not aligned or matched. "Pixels match but file differs" is reported as MODIFICATION DETECTED (not EXACT MATCH).
 - The scanner uses the system file picker (`file_picker`); the chosen photo is read locally and never uploaded.
+
+## Audit notes (signing, sync, GPS)
+- The signed string starts with `v=<protocol version>` (2 or 3). The server previously hard-coded `v=2`, so real v3 photos could not register; a shared golden vector is now asserted in `tests/test_privacy_registration.py` and `test/sync_service_test.dart`.
+- Fingerprints are hashes of the decoded pixel buffer (`image` package, no EXIF rotation), computed in a background isolate.
+- `/register` rejects fingerprint manifests that are not valid JSON, larger than 64x64 grid, or whose region list does not match the grid.
+- Rate limiting uses the rightmost `X-Forwarded-For` entry (the proxy-added one), because the leftmost is client-controlled.

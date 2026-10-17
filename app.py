@@ -54,7 +54,8 @@ def _rate_limit():
     if request.path != "/register" and not request.path.startswith("/api/") or _RATE_LIMIT <= 0:
         return None
     now = time.time()
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+    # Rightmost entry is the one appended by the platform proxy; the leftmost is client-controlled.
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[-1].strip()
     hits = [t for t in _rate_hits.get(ip, []) if now - t < 60]
     if len(hits) >= _RATE_LIMIT:
         _rate_hits[ip] = hits
@@ -152,8 +153,8 @@ h1{font-size:1.3rem;margin:0 0 2px}
   <p class="status-title">✅ Signed Record Verified</p>
   <p class="status-body">
     The Ed25519 signature on this record is <strong>cryptographically valid</strong>.
-    This confirms the record was created by the registered device and has not been
-    altered on the server.<br><br>
+    This confirms the record was signed with the device key shown below and has not been
+    altered since. It does not identify who owns that key.<br><br>
     <strong>This does not confirm that the image you received is unmodified.</strong>
     To check for cropping or pixel-level tampering, use the GeoCam app.
   </p>
@@ -244,15 +245,15 @@ def canonical(record):
     v2 (legacy): no image-dimension or fingerprint fields.
     v3 (new):    adds img=<WxH>|fp_version=<int>|fp_sha256=<hex>
 
-    The canonical function is backward-compatible: v2 records simply lack those
-    trailing fields and produce the same hash they always did.
+    The leading "v=" is the record's protocol version (2 or 3), matching Dart. v2 records
+    lack the trailing fields and produce the same bytes they always did.
     """
-    proto = record.get("protocolVersion") or 2
+    proto = record.get("protocolVersion") or record.get("protocol_version") or 2
     address = rv(record, "address") or ""
     address_b64 = base64.b64encode(address.encode("utf-8")).decode("ascii")
 
     parts = [
-        "v=2",
+        f"v={proto}",
         f"id={record['id']}",
         f"type={rv(record, 'mediaType', 'media_type')}",
         f"ts={record['timestamp']}",
@@ -287,6 +288,8 @@ def validate_record(r, *, require_media_sha256=True):
     proto = r.get("protocolVersion")
     if proto not in (2, 3):
         raise ValueError("Unsupported protocol version (expected 2 or 3)")
+    if not isinstance(r.get("address", ""), str) or len(r.get("address") or "") > 1024:
+        raise ValueError("Invalid address")
     if not isinstance(r["id"], str) or not ID_RE.fullmatch(r["id"]):
         raise ValueError("Invalid record id")
     if r["mediaType"] not in ("photo", "video"):
@@ -338,6 +341,19 @@ def row_to_result(row):
     result["fpSha256"] = result.pop("fp_sha256", None)
     result["regionFingerprints"] = result.pop("region_fingerprints", None)
     return result
+
+
+def _check_manifest_shape(raw):
+    """Bound the stored fingerprint manifest so it cannot be used to waste resources."""
+    try:
+        m = json.loads(raw)
+        rows, cols, regions = m["gridRows"], m["gridCols"], m["regions"]
+    except (ValueError, KeyError, TypeError):
+        raise ValueError("regionFingerprints is not a valid manifest")
+    if (not isinstance(rows, int) or not isinstance(cols, int) or not isinstance(regions, list)
+            or not 0 < rows <= 64 or not 0 < cols <= 64 or len(regions) != rows * cols
+            or not all(isinstance(x, str) and SHA256_RE.fullmatch(x) for x in regions)):
+        raise ValueError("regionFingerprints manifest has an invalid grid")
 
 
 def _check_trusted_key(record):
@@ -403,6 +419,7 @@ def register_record():
                 raise ValueError("regionFingerprints manifest is too large (max 256 KB)")
             if hashlib.sha256(region_fps.encode("utf-8")).hexdigest() != fp_sha256:
                 raise ValueError("fpSha256 does not match regionFingerprints")
+            _check_manifest_shape(region_fps)
 
         existing = store.get_record(record["id"])
         if existing:
@@ -411,10 +428,16 @@ def register_record():
                 return jsonify(error="Record ID already exists with different cryptographic content"), 409
             return jsonify(success=True, id=record["id"], alreadyExists=True)
 
-        store.put_metadata(record)
+        if not store.put_metadata(record):
+            # Lost a race with a concurrent insert of the same id: compare, don't assume.
+            existing = store.get_record(record["id"])
+            if not existing or (existing["signature"] != record["signature"] or
+                                existing["media_sha256"] != record["mediaSha256"]):
+                return jsonify(error="Record ID already exists with different cryptographic content"), 409
+            return jsonify(success=True, id=record["id"], alreadyExists=True)
         return jsonify(success=True, id=record["id"], registered=True)
 
-    except (ValueError, json.JSONDecodeError) as e:
+    except (ValueError, TypeError, json.JSONDecodeError) as e:
         return jsonify(error=str(e)), 400
     except Exception:
         app.logger.exception("register failure")

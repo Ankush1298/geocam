@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:geolocator/geolocator.dart';
 
 class LocationService {
+  static const maxCachedAge = Duration(minutes: 2);
+
   Future<bool> ensurePermission() async {
     if (!await Geolocator.isLocationServiceEnabled()) return false;
 
@@ -19,8 +21,13 @@ class LocationService {
     if (!await Geolocator.isLocationServiceEnabled()) return null;
     if (!await ensurePermission()) return null;
 
+    // A cached fix is only used if it is recent; otherwise a stale location
+    // from hours ago would be signed as the capture location.
     final cached = await Geolocator.getLastKnownPosition();
-    if (cached != null) return cached;
+    if (cached != null &&
+        DateTime.now().difference(cached.timestamp).abs() <= maxCachedAge) {
+      return cached;
+    }
 
     try {
       return await Geolocator.getCurrentPosition(

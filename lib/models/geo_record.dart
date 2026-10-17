@@ -28,7 +28,7 @@ class GeoRecord {
   final String? regionFingerprints;
 
   const GeoRecord({
-    this.protocolVersion = 3,
+    this.protocolVersion = 2,
     required this.id,
     required this.stampedPath,
     required this.originalPath,
@@ -76,7 +76,9 @@ class GeoRecord {
       };
 
   factory GeoRecord.fromJson(Map<String, dynamic> json) => GeoRecord(
-        protocolVersion: (json['protocolVersion'] as num?)?.toInt() ?? 2,
+        // Videos are only ever signed with the v2 canonical form. Builds that stored
+        // them as v3 made the gallery and server reject their (valid) signatures.
+        protocolVersion: json['mediaType'] == 'video' ? 2 : (json['protocolVersion'] as num?)?.toInt() ?? 2,
         id: json['id'] as String,
         stampedPath: json['stampedPath'] as String,
         originalPath: json['originalPath'] as String,

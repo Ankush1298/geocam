@@ -108,6 +108,10 @@ class LocalStore:
             # Idempotent migrations for databases created before v3.
             self._migrate(conn)
             conn.commit()
+            # Pre-privacy databases have a NOT NULL media_path column; keep filling it with ''.
+            self._legacy_media_path = "media_path" in {
+                r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()
+            }
 
     @staticmethod
     def _migrate(conn):
@@ -142,12 +146,15 @@ class LocalStore:
 
     def put_metadata(self, rec):
         """Store only signed metadata — no media bytes accepted or stored."""
-        placeholders = ", ".join(["?"] * len(COLUMNS))
-        col_list = ", ".join(COLUMNS)
+        cols, values = list(COLUMNS), list(_meta_values(rec))
+        if self._legacy_media_path:
+            cols.append("media_path")
+            values.append("")
+        placeholders = ", ".join(["?"] * len(cols))
         with closing(self._connect()) as conn:
             cur = conn.execute(
-                f"INSERT OR IGNORE INTO records ({col_list}) VALUES ({placeholders})",
-                _meta_values(rec),
+                f"INSERT OR IGNORE INTO records ({', '.join(cols)}) VALUES ({placeholders})",
+                values,
             )
             conn.commit()
             return cur.rowcount == 1
@@ -233,7 +240,7 @@ class RemoteStore:
                 conn.execute(sql)
                 log.info("Remote migration: %s", sql)
             except Exception:
-                pass  # Column already exists or unsupported syntax — safe to ignore
+                log.exception("Remote migration failed (continuing): %s", sql)
 
     def _connect(self):
         return self._psycopg.connect(

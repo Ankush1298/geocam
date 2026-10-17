@@ -108,13 +108,28 @@ class GeoCameraController extends ChangeNotifier {
         photoProcessor = photoProcessor ?? PhotoProcessor(),
         videoProcessor = videoProcessor ?? VideoProcessor();
 
+  /// Label from the horizontal accuracy (metres, 68% confidence radius) that the
+  /// device reports. Thresholds: <=10 excellent, <=25 good, <=100 moderate, else weak.
+  /// This describes how precise the reading claims to be; it does not prove the
+  /// location is real (mock locations and spoofing are not detected).
+  static String gpsQualityLabel(double? accuracyMeters) {
+    if (accuracyMeters == null) return 'Waiting for GPS';
+    final m = accuracyMeters.round();
+    if (accuracyMeters <= 10) return 'GPS excellent (±$m m)';
+    if (accuracyMeters <= 25) return 'GPS good (±$m m)';
+    if (accuracyMeters <= 100) return 'GPS moderate (±$m m)';
+    return 'GPS weak (±$m m)';
+  }
+
   String get locationStatus {
-    final p = position;
-    if (p == null) return 'Waiting for GPS';
-    if (p.accuracy <= 10) return 'GPS excellent';
-    if (p.accuracy <= 25) return 'GPS good';
-    if (p.accuracy <= 100) return 'GPS moderate';
-    return 'GPS weak';
+    if (position == null && !locationLoading) {
+      if (!locationServiceEnabled) return 'Location is off';
+      if (locationPermission == LocationPermission.denied ||
+          locationPermission == LocationPermission.deniedForever) {
+        return 'Location permission needed';
+      }
+    }
+    return gpsQualityLabel(position?.accuracy);
   }
 
   bool get hasGoodGps => position != null && position!.accuracy <= 100;
@@ -135,7 +150,8 @@ class GeoCameraController extends ChangeNotifier {
 
   Future<void> initialize() async {
     settings = await StampSettings.load();
-    if (settings.cloudVerification) unawaited(SyncService.syncPending());
+    unawaited(SyncService.syncPending());
+    SyncService.startAutoRetry();
     frame = await CameraFrameSettings.load();
     await initializeCamera();
     await initializeLocation();
@@ -464,7 +480,7 @@ class GeoCameraController extends ChangeNotifier {
         signature: signature, mediaSha256: mediaSha256, publicKey: publicKey,
       );
       final saved = (await HistoryStore.load()).firstWhere((r) => r.id == recordId);
-      if (settings.cloudVerification) unawaited(SyncService.sync(saved));
+      unawaited(SyncService.sync(saved));
       // HistoryStore now owns its own copy, so the camera/FFmpeg temporary
       // files can always be removed after the record is committed.
       if (finalPath != inputPath) { try { await File(finalPath).delete(); } catch (_) {} }
@@ -488,7 +504,7 @@ class GeoCameraController extends ChangeNotifier {
           signature: signature, mediaSha256: mediaSha256, publicKey: publicKey,
         );
         final saved = (await HistoryStore.load()).firstWhere((r) => r.id == recordId);
-        if (settings.cloudVerification) unawaited(SyncService.sync(saved));
+        unawaited(SyncService.sync(saved));
         if (finalPath != inputPath) { try { await File(finalPath).delete(); } catch (_) {} }
         try { await File(inputPath).delete(); } catch (_) {}
         return saved.stampedPath;
@@ -637,7 +653,7 @@ class GeoCameraController extends ChangeNotifier {
           regionFingerprints: regionFingerprints,
         );
         final saved = (await HistoryStore.load()).firstWhere((r) => r.id == recordId);
-        if (settings.cloudVerification) unawaited(SyncService.sync(saved));
+        unawaited(SyncService.sync(saved));
       } catch (_) {}
     }
     try { await File(shotPath).delete(); } catch (_) {}

@@ -14,7 +14,11 @@ class HistoryStore {
     _writeQueue = next.catchError((_) {});
     return next;
   }
+  @visibleForTesting
+  static Directory? rootOverride;
+
   static Future<Directory> _root() async {
+    if (rootOverride != null) return rootOverride!;
     final base = await getApplicationSupportDirectory();
     final dir = Directory('${base.path}/geocam_records');
     if (!await dir.exists()) await dir.create(recursive: true);

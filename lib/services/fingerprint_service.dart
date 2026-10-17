@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
@@ -138,6 +139,26 @@ class RegionFingerprintManifest {
   }
 }
 
+/// Region digests over the decoded pixel buffer (`image` package, no EXIF
+/// rotation applied; the same decode is used when generating and verifying).
+/// Runs in a background isolate because decoding a full photo is slow.
+({int width, int height, List<String> digests})? _grid(Uint8List bytes, int rows, int cols) {
+  final image = img.decodeImage(bytes);
+  if (image == null) return null;
+  final digests = <String>[];
+  for (var r = 0; r < rows; r++) {
+    final y0 = (r * image.height) ~/ rows;
+    final y1 = ((r + 1) * image.height) ~/ rows;
+    for (var c = 0; c < cols; c++) {
+      final x0 = (c * image.width) ~/ cols;
+      final x1 = ((c + 1) * image.width) ~/ cols;
+      final crop = img.copyCrop(image, x: x0, y: y0, width: x1 - x0, height: y1 - y0);
+      digests.add(crypto.sha256.convert(crop.toUint8List()).toString());
+    }
+  }
+  return (width: image.width, height: image.height, digests: digests);
+}
+
 /// Service to generate and verify image region fingerprints (Layer B).
 class FingerprintService {
   /// Compute region fingerprints over image bytes.
@@ -147,37 +168,16 @@ class FingerprintService {
     int gridCols = RegionFingerprintManifest.defaultGridCols,
   }) async {
     try {
-      final image = img.decodeImage(imageBytes);
-      if (image == null) return null;
-
-      final width = image.width;
-      final height = image.height;
-      final regions = <String>[];
-
-      for (var r = 0; r < gridRows; r++) {
-        final y0 = (r * height) ~/ gridRows;
-        final y1 = ((r + 1) * height) ~/ gridRows;
-        final h = y1 - y0;
-
-        for (var c = 0; c < gridCols; c++) {
-          final x0 = (c * width) ~/ gridCols;
-          final x1 = ((c + 1) * width) ~/ gridCols;
-          final w = x1 - x0;
-
-          final crop = img.copyCrop(image, x: x0, y: y0, width: w, height: h);
-          final digest = crypto.sha256.convert(crop.toUint8List()).toString();
-          regions.add(digest);
-        }
-      }
-
+      final grid = await Isolate.run(() => _grid(imageBytes, gridRows, gridCols));
+      if (grid == null) return null;
       return RegionFingerprintManifest(
         fpVersion: 1,
         algorithm: RegionFingerprintManifest.defaultAlgorithm,
-        imageWidth: width,
-        imageHeight: height,
+        imageWidth: grid.width,
+        imageHeight: grid.height,
         gridRows: gridRows,
         gridCols: gridCols,
-        regions: regions,
+        regions: grid.digests,
       );
     } catch (_) {
       return null;
@@ -255,13 +255,13 @@ class FingerprintService {
       );
     }
 
-    img.Image? decoded;
+    ({int width, int height, List<String> digests})? grid;
     try {
-      decoded = img.decodeImage(receivedBytes);
+      grid = await Isolate.run(() => _grid(receivedBytes, manifest.gridRows, manifest.gridCols));
     } catch (_) {}
 
-    if (decoded == null) {
-      return VerificationResult(
+    if (grid == null) {
+      return const VerificationResult(
         outcome: VerificationOutcome.unableToVerify,
         signatureValid: true,
         exactFileMatch: false,
@@ -272,8 +272,8 @@ class FingerprintService {
 
     final origW = manifest.imageWidth;
     final origH = manifest.imageHeight;
-    final testW = decoded.width;
-    final testH = decoded.height;
+    final testW = grid.width;
+    final testH = grid.height;
     final origDimStr = '${origW}x$origH';
     final testDimStr = '${testW}x$testH';
 
@@ -303,25 +303,11 @@ class FingerprintService {
     var matches = 0;
     final regionMatches = <bool>[];
 
-    for (var r = 0; r < rows; r++) {
-      final y0 = (r * testH) ~/ rows;
-      final y1 = ((r + 1) * testH) ~/ rows;
-      final h = y1 - y0;
-
-      for (var c = 0; c < cols; c++) {
-        final x0 = (c * testW) ~/ cols;
-        final x1 = ((c + 1) * testW) ~/ cols;
-        final w = x1 - x0;
-
-        final crop = img.copyCrop(decoded, x: x0, y: y0, width: w, height: h);
-        final digest = crypto.sha256.convert(crop.toUint8List()).toString();
-
-        final idx = r * cols + c;
-        final expectedDigest = idx < manifest.regions.length ? manifest.regions[idx] : null;
-        final matched = (expectedDigest != null && expectedDigest.toLowerCase() == digest.toLowerCase());
-        if (matched) matches++;
-        regionMatches.add(matched);
-      }
+    for (var i = 0; i < total; i++) {
+      final expected = i < manifest.regions.length ? manifest.regions[i] : null;
+      final matched = expected != null && expected.toLowerCase() == grid.digests[i].toLowerCase();
+      if (matched) matches++;
+      regionMatches.add(matched);
     }
 
     if (matches == total) {

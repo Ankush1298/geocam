@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// Device-local Ed25519 identity and capture signing service.
@@ -35,7 +35,10 @@ class HashService {
     return _ed25519.newKeyPairFromSeed(await _getSeed());
   }
 
-  static String _canonical({
+  /// The exact string that is signed. Must stay byte-identical to the server's
+  /// `canonical()` in app.py (pinned by a shared golden vector in both test suites).
+  @visibleForTesting
+  static String canonicalMessage({
     int proto = 2,
     required String recordId,
     required String mediaType,
@@ -102,7 +105,7 @@ class HashService {
   }) async {
     final effectiveProto = (proto >= 3 || (fpVersion > 0) || (imageDimensions != null && imageDimensions.isNotEmpty)) ? 3 : 2;
     final keyPair = await _keyPair();
-    final msg = _canonical(
+    final msg = canonicalMessage(
       proto: effectiveProto,
       recordId: recordId,
       mediaType: mediaType,
@@ -142,7 +145,7 @@ class HashService {
     try {
       final pub = SimplePublicKey(base64Decode(publicKey), type: KeyPairType.ed25519);
       final signature = Signature(base64Decode(storedSignature), publicKey: pub);
-      final msg = _canonical(
+      final msg = canonicalMessage(
         proto: proto,
         recordId: recordId,
         mediaType: mediaType,
