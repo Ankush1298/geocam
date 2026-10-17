@@ -29,6 +29,23 @@ android {
             signingConfig signingConfigs.debug
         }
     }
+
+    packaging {
+        resources {
+            excludes += ['**/._*']
+        }
+    }
 }
 
 flutter { source '../..' }
+
+tasks.configureEach { task ->
+    if (task.name.contains("Resource") || task.name.contains("Assets") || task.name.contains("Bundle")) {
+        task.doFirst {
+            def bDir = file("${project.projectDir}/../../build")
+            if (bDir.exists()) {
+                fileTree(dir: bDir, include: "**/._*").each { it.delete() }
+            }
+        }
+    }
+}

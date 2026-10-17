@@ -8,6 +8,7 @@ import '../../models/stamp_settings.dart';
 import '../../models/camera_frame.dart';
 import '../capture/result_page.dart';
 import '../history/history_page.dart';
+import '../scanner/scanner_page.dart';
 import '../settings/settings_sheet.dart';
 import 'camera_controller.dart';
 import 'widgets/location_status_card.dart';
@@ -315,6 +316,7 @@ class _CameraPageState extends State<CameraPage> {
   }
 
   void _openHistory() => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HistoryPage()));
+  void _openScanner() => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ScannerPage()));
 
   @override
   Widget build(BuildContext context) {
@@ -388,6 +390,7 @@ class _CameraPageState extends State<CameraPage> {
                   ]),
                 ),
                 const Spacer(),
+                _TopButton(icon: Icons.qr_code_scanner, tooltip: 'Scan / Verify QR', onPressed: _openScanner),
                 _TopButton(icon: Icons.photo_library_outlined, tooltip: 'Gallery', onPressed: _openHistory),
                 _TopButton(icon: Icons.tune, tooltip: 'Stamp settings', onPressed: _openSettings),
                 _TopButton(icon: controller.flashOn ? Icons.flash_on : Icons.flash_off, tooltip: 'Flash', onPressed: ready ? controller.toggleFlash : null),

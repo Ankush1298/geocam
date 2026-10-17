@@ -69,3 +69,8 @@ DerivedData
 # Android / local generated files
 android/.gradle/
 android/local.properties
+
+# Local artifacts
+._*
+android/.kotlin/
+data/media/

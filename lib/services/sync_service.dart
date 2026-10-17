@@ -25,42 +25,55 @@ class SyncService {
 
   static Future<bool> _syncOne(GeoRecord record) async {
     try {
-      final media = File(record.stampedPath);
-      if (!await media.exists()) throw StateError('Stamped media is missing.');
-      final request = http.MultipartRequest(
-        'POST',
-        Uri.parse('$verificationBaseUrl/sync'),
-      )
-        ..fields['record'] = jsonEncode({
-          'protocolVersion': 2,
-          'id': record.id,
-          'timestamp': record.timestamp.toUtc().toIso8601String(),
-          'latitude': record.latitude,
-          'longitude': record.longitude,
-          'accuracy': record.accuracy,
-          'altitude': record.altitude,
-          'address': record.address,
-          'mediaType': record.mediaType,
-          'signature': record.signature,
-          'mediaSha256': record.mediaSha256,
-          'publicKey': record.publicKey,
-        })
-        ..files.add(await http.MultipartFile.fromPath(
-          'media',
-          record.stampedPath,
-          filename: '${record.id}.${record.isVideo ? 'mp4' : 'jpg'}',
-        ));
+      final payload = {
+        'protocolVersion': record.protocolVersion,
+        'id': record.id,
+        'timestamp': record.timestamp.toUtc().toIso8601String(),
+        'latitude': record.latitude,
+        'longitude': record.longitude,
+        'accuracy': record.accuracy,
+        'altitude': record.altitude,
+        'address': record.address,
+        'mediaType': record.mediaType,
+        'signature': record.signature,
+        'mediaSha256': record.mediaSha256,
+        'publicKey': record.publicKey,
+        if (record.imageDimensions != null) 'imageDimensions': record.imageDimensions,
+        'fpVersion': record.fpVersion,
+        if (record.fpSha256 != null) 'fpSha256': record.fpSha256,
+        if (record.regionFingerprints != null) 'regionFingerprints': record.regionFingerprints,
+      };
 
-      final response = await request.send().timeout(timeout);
-      final body = await response.stream.bytesToString();
+      final response = await http.post(
+        Uri.parse('$verificationBaseUrl/register'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      ).timeout(timeout);
+
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException('Sync failed (${response.statusCode}): $body');
+        throw HttpException('Sync failed (${response.statusCode}): ${response.body}');
       }
       await HistoryStore.updateSyncStatus(record.id, 'synced');
       return true;
     } catch (_) {
       await HistoryStore.updateSyncStatus(record.id, 'failed');
       return false;
+    }
+  }
+
+  /// Fetch signed record metadata from `/api/record/<id>` for in-app verification.
+  /// Never downloads media bytes.
+  static Future<Map<String, dynamic>?> fetchRecord(String recordId) async {
+    try {
+      final response = await http.get(
+        Uri.parse('$verificationBaseUrl/api/record/$recordId'),
+      ).timeout(timeout);
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (_) {
+      return null;
     }
   }
 

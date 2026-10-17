@@ -2,152 +2,243 @@
 
 LocalStore  - SQLite + files on local disk. Fine for local dev, but on Render's
               free plan the disk is wiped on every spin-down/redeploy.
-RemoteStore - Postgres (records) + S3-compatible bucket (media). Survives
+RemoteStore - Postgres (records) + S3-compatible bucket (metadata JSON). Survives
               restarts. Works with Supabase/Neon + Cloudflare R2/Supabase Storage/B2.
+
+Schema v3 adds:
+  image_dimensions TEXT   — e.g. "3024x4032"
+  fp_version       INTEGER — fingerprint algorithm version (0 = none, 1 = grid-sha256-v1)
+  fp_sha256        TEXT   — SHA-256 of the canonical fingerprint manifest
+  region_fingerprints TEXT — compact JSON string of per-region hashes
+
+No media bytes are stored for records registered via the privacy-first /register
+endpoint.  The legacy /sync route also no longer persists media bytes.
 """
-import hashlib
 import logging
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import redirect, send_file
-
 log = logging.getLogger("geocam.storage")
 
+# All columns returned to the application layer.
 COLUMNS = (
     "id", "protocol_version", "timestamp", "latitude", "longitude", "accuracy",
     "altitude", "address", "media_type", "signature", "media_sha256",
-    "public_key", "created_at",
+    "public_key", "image_dimensions", "fp_version", "fp_sha256",
+    "region_fingerprints", "created_at",
 )
-
-
-def _ext(media_type):
-    return "mp4" if media_type == "video" else "jpg"
-
-
-def _mime(media_type):
-    return "video/mp4" if media_type == "video" else "image/jpeg"
 
 
 def _now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _values(rec):
+def _rv(rec, camel, snake=None):
+    if not isinstance(rec, dict):
+        return None
+    if camel in rec:
+        return rec[camel]
+    if snake and snake in rec:
+        return rec[snake]
+    return None
+
+
+def _meta_values(rec):
+    """Extract a tuple matching COLUMNS order for INSERT."""
     return (
-        rec["id"], 2, rec["timestamp"], rec.get("latitude"), rec.get("longitude"),
-        rec.get("accuracy"), rec.get("altitude"), rec.get("address", ""),
-        rec["mediaType"], rec["signature"], rec["mediaSha256"], rec["publicKey"], _now(),
+        rec["id"],
+        rec.get("protocolVersion") or 2,
+        rec["timestamp"],
+        rec.get("latitude"),
+        rec.get("longitude"),
+        rec.get("accuracy"),
+        rec.get("altitude"),
+        rec.get("address") or "",
+        _rv(rec, "mediaType", "media_type"),
+        rec["signature"],
+        _rv(rec, "mediaSha256", "media_sha256"),
+        _rv(rec, "publicKey", "public_key"),
+        _rv(rec, "imageDimensions", "image_dimensions"),
+        int(rec.get("fpVersion") or rec.get("fp_version") or 0),
+        _rv(rec, "fpSha256", "fp_sha256"),
+        rec.get("regionFingerprints") or rec.get("region_fingerprints"),
+        _now(),
     )
 
+
+# ---------------------------------------------------------------------------
+# LocalStore
+# ---------------------------------------------------------------------------
 
 class LocalStore:
     kind = "local"
 
+    _CREATE_TABLE = """
+        CREATE TABLE IF NOT EXISTS records (
+            id                  TEXT PRIMARY KEY,
+            protocol_version    INTEGER NOT NULL,
+            timestamp           TEXT NOT NULL,
+            latitude            REAL,
+            longitude           REAL,
+            accuracy            REAL,
+            altitude            REAL,
+            address             TEXT NOT NULL DEFAULT '',
+            media_type          TEXT NOT NULL,
+            signature           TEXT NOT NULL,
+            media_sha256        TEXT NOT NULL,
+            public_key          TEXT NOT NULL,
+            image_dimensions    TEXT,
+            fp_version          INTEGER NOT NULL DEFAULT 0,
+            fp_sha256           TEXT,
+            region_fingerprints TEXT,
+            created_at          TEXT NOT NULL
+        )
+    """
+
     def __init__(self, data_dir, db_path):
-        self.media_dir = Path(data_dir) / "media"
         self.db_path = Path(db_path)
-        self.media_dir.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn:
-            conn.execute("""CREATE TABLE IF NOT EXISTS records (
-                id TEXT PRIMARY KEY, protocol_version INTEGER NOT NULL, timestamp TEXT NOT NULL,
-                latitude REAL, longitude REAL, accuracy REAL, altitude REAL,
-                address TEXT NOT NULL, media_type TEXT NOT NULL, signature TEXT NOT NULL,
-                media_sha256 TEXT NOT NULL, public_key TEXT NOT NULL, media_path TEXT NOT NULL,
-                created_at TEXT NOT NULL)""")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_records_public_key ON records(public_key)")
+            conn.execute(self._CREATE_TABLE)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_records_public_key ON records(public_key)"
+            )
+            # Idempotent migrations for databases created before v3.
+            self._migrate(conn)
             conn.commit()
+
+    @staticmethod
+    def _migrate(conn):
+        """Add v3 columns to pre-existing databases without dropping data."""
+        existing = {
+            row[1] for row in conn.execute("PRAGMA table_info(records)").fetchall()
+        }
+        migrations = [
+            ("image_dimensions",    "ALTER TABLE records ADD COLUMN image_dimensions TEXT"),
+            ("fp_version",          "ALTER TABLE records ADD COLUMN fp_version INTEGER NOT NULL DEFAULT 0"),
+            ("fp_sha256",           "ALTER TABLE records ADD COLUMN fp_sha256 TEXT"),
+            ("region_fingerprints", "ALTER TABLE records ADD COLUMN region_fingerprints TEXT"),
+        ]
+        for col, sql in migrations:
+            if col not in existing:
+                conn.execute(sql)
+                log.info("Migrated: added column %s", col)
+        # Remove legacy media_path column reference — it may not exist in new dbs.
+        # We do NOT drop it if it exists so existing data is safe.
 
     def _connect(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _path(self, rec_id, media_type):
-        return self.media_dir / f"{rec_id}.{_ext(media_type)}"
-
     def get_record(self, rec_id):
         with closing(self._connect()) as conn:
-            row = conn.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
-        if not row:
-            return None
-        d = dict(row)
-        d.pop("media_path", None)
-        return d
+            row = conn.execute(
+                f"SELECT {', '.join(COLUMNS)} FROM records WHERE id=?", (rec_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
-    def put(self, rec, raw):
-        path = self._path(rec["id"], rec["mediaType"])
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_bytes(raw)
-        tmp.replace(path)
+    def put_metadata(self, rec):
+        """Store only signed metadata — no media bytes accepted or stored."""
+        placeholders = ", ".join(["?"] * len(COLUMNS))
+        col_list = ", ".join(COLUMNS)
         with closing(self._connect()) as conn:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO records (id, protocol_version, timestamp, latitude, longitude, "
-                "accuracy, altitude, address, media_type, signature, media_sha256, public_key, "
-                "created_at, media_path) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                _values(rec) + (str(path),),
+                f"INSERT OR IGNORE INTO records ({col_list}) VALUES ({placeholders})",
+                _meta_values(rec),
             )
             conn.commit()
             return cur.rowcount == 1
 
+    # ── Legacy methods kept for tests / backward compat ──────────────────────
+
+    def put(self, rec, raw=None):  # noqa: ARG002  raw is intentionally ignored
+        """Alias for put_metadata; raw bytes are accepted but discarded."""
+        return self.put_metadata(rec)
+
     def media_exists(self, row):
-        return self._path(row["id"], row["media_type"]).exists()
+        """Always False — media is no longer stored."""
+        return False
 
     def media_sha256(self, row):
-        path = self._path(row["id"], row["media_type"])
-        if not path.exists():
-            return None
-        h = hashlib.sha256()
-        with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        return h.hexdigest()
+        """Returns None — media is not stored; hash comes from the signed record."""
+        return None
 
     def serve_media(self, row):
-        return send_file(self._path(row["id"], row["media_type"]), conditional=True)
+        raise NotImplementedError("Media serving is disabled in the privacy-first server")
 
+
+# ---------------------------------------------------------------------------
+# RemoteStore
+# ---------------------------------------------------------------------------
 
 class RemoteStore:
     kind = "remote"
 
+    _CREATE_TABLE = """
+        CREATE TABLE IF NOT EXISTS records (
+            id                  TEXT PRIMARY KEY,
+            protocol_version    INTEGER NOT NULL,
+            timestamp           TEXT NOT NULL,
+            latitude            DOUBLE PRECISION,
+            longitude           DOUBLE PRECISION,
+            accuracy            DOUBLE PRECISION,
+            altitude            DOUBLE PRECISION,
+            address             TEXT NOT NULL DEFAULT '',
+            media_type          TEXT NOT NULL,
+            signature           TEXT NOT NULL,
+            media_sha256        TEXT NOT NULL,
+            public_key          TEXT NOT NULL,
+            image_dimensions    TEXT,
+            fp_version          INTEGER NOT NULL DEFAULT 0,
+            fp_sha256           TEXT,
+            region_fingerprints TEXT,
+            created_at          TEXT NOT NULL
+        )
+    """
+
     def __init__(self, database_url, bucket, endpoint_url, access_key, secret_key, region="auto"):
-        import boto3
         import psycopg
-        from botocore.config import Config
         from psycopg.rows import dict_row
 
         self._psycopg, self._dict_row = psycopg, dict_row
         self.database_url = database_url
+        # S3 bucket kept in case legacy media still needs to be cleared by ops.
         self.bucket = bucket
-        self.s3 = boto3.client(
-            "s3", endpoint_url=endpoint_url or None,
-            aws_access_key_id=access_key, aws_secret_access_key=secret_key,
-            region_name=region,
-            config=Config(signature_version="s3v4", s3={"addressing_style": "path"},
-                          retries={"max_attempts": 3},
-                          # Newer boto3 adds CRC32 checksum trailers that many S3-compatible
-                          # services (Supabase, R2, B2) reject. Only send them when required.
-                          request_checksum_calculation="when_required",
-                          response_checksum_validation="when_required"),
-        )
-        with self._connect() as conn:
-            conn.execute("""CREATE TABLE IF NOT EXISTS records (
-                id TEXT PRIMARY KEY, protocol_version INTEGER NOT NULL, timestamp TEXT NOT NULL,
-                latitude DOUBLE PRECISION, longitude DOUBLE PRECISION,
-                accuracy DOUBLE PRECISION, altitude DOUBLE PRECISION,
-                address TEXT NOT NULL, media_type TEXT NOT NULL, signature TEXT NOT NULL,
-                media_sha256 TEXT NOT NULL, public_key TEXT NOT NULL, created_at TEXT NOT NULL)""")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_records_public_key ON records(public_key)")
+        self._endpoint_url = endpoint_url
+        self._access_key = access_key
+        self._secret_key = secret_key
+        self._region = region
 
-    def _connect(self):
-        return self._psycopg.connect(self.database_url, row_factory=self._dict_row, connect_timeout=10)
+        with self._connect() as conn:
+            conn.execute(self._CREATE_TABLE)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_records_public_key ON records(public_key)"
+            )
+            self._migrate(conn)
 
     @staticmethod
-    def _key(row_id, media_type):
-        return f"media/{row_id}.{_ext(media_type)}"
+    def _migrate(conn):
+        """Idempotent column additions for pre-v3 databases."""
+        migrations = [
+            "ALTER TABLE records ADD COLUMN IF NOT EXISTS image_dimensions TEXT",
+            "ALTER TABLE records ADD COLUMN IF NOT EXISTS fp_version INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE records ADD COLUMN IF NOT EXISTS fp_sha256 TEXT",
+            "ALTER TABLE records ADD COLUMN IF NOT EXISTS region_fingerprints TEXT",
+        ]
+        for sql in migrations:
+            try:
+                conn.execute(sql)
+                log.info("Remote migration: %s", sql)
+            except Exception:
+                pass  # Column already exists or unsupported syntax — safe to ignore
+
+    def _connect(self):
+        return self._psycopg.connect(
+            self.database_url, row_factory=self._dict_row, connect_timeout=10
+        )
 
     def get_record(self, rec_id):
         with self._connect() as conn:
@@ -155,56 +246,29 @@ class RemoteStore:
                 f"SELECT {', '.join(COLUMNS)} FROM records WHERE id=%s", (rec_id,)
             ).fetchone()
 
-    def put(self, rec, raw):
-        # Media first, so a record never points at media that does not exist.
-        from botocore.exceptions import ClientError
-        try:
-            self.s3.put_object(Bucket=self.bucket, Key=self._key(rec["id"], rec["mediaType"]),
-                               Body=raw, ContentType=_mime(rec["mediaType"]))
-        except ClientError as e:
-            meta = e.response.get("ResponseMetadata", {})
-            log.error("S3 upload failed: http=%s error=%s headers=%s", meta.get("HTTPStatusCode"),
-                      e.response.get("Error"), meta.get("HTTPHeaders"))
-            raise
+    def put_metadata(self, rec):
+        """Store signed metadata only."""
+        col_list = ", ".join(COLUMNS)
+        placeholders = ", ".join(["%s"] * len(COLUMNS))
         with self._connect() as conn:
             cur = conn.execute(
-                f"INSERT INTO records ({', '.join(COLUMNS)}) VALUES ({', '.join(['%s'] * len(COLUMNS))}) "
+                f"INSERT INTO records ({col_list}) VALUES ({placeholders}) "
                 "ON CONFLICT (id) DO NOTHING",
-                _values(rec),
+                _meta_values(rec),
             )
             return cur.rowcount == 1
 
-    def _head(self, row):
-        from botocore.exceptions import ClientError
-        try:
-            self.s3.head_object(Bucket=self.bucket, Key=self._key(row["id"], row["media_type"]))
-            return True
-        except ClientError as e:
-            if e.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
-                return False
-            raise
+    # ── Legacy ────────────────────────────────────────────────────────────────
+
+    def put(self, rec, raw=None):  # noqa: ARG002
+        """Alias for put_metadata; raw bytes are accepted but discarded."""
+        return self.put_metadata(rec)
 
     def media_exists(self, row):
-        return self._head(row)
+        return False
 
     def media_sha256(self, row):
-        from botocore.exceptions import ClientError
-        try:
-            obj = self.s3.get_object(Bucket=self.bucket, Key=self._key(row["id"], row["media_type"]))
-        except ClientError as e:
-            if e.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
-                return None
-            raise
-        h = hashlib.sha256()
-        for chunk in obj["Body"].iter_chunks(1 << 20):
-            h.update(chunk)
-        return h.hexdigest()
+        return None
 
     def serve_media(self, row):
-        url = self.s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self.bucket, "Key": self._key(row["id"], row["media_type"]),
-                    "ResponseContentType": _mime(row["media_type"])},
-            ExpiresIn=900,
-        )
-        return redirect(url, code=302)
+        raise NotImplementedError("Media serving is disabled in the privacy-first server")

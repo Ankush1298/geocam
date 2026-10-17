@@ -15,6 +15,7 @@ import '../../services/history_store.dart';
 import '../../services/location_service.dart';
 import '../../services/photo_processor.dart';
 import '../../services/video_processor.dart';
+import '../../services/fingerprint_service.dart';
 import '../../services/record_id_service.dart';
 import '../../services/sync_service.dart';
 
@@ -589,19 +590,51 @@ class GeoCameraController extends ChangeNotifier {
     if (!kIsWeb) {
       final mediaSha256 = await HashService.sha256Bytes(stampedWithExif);
       final publicKey = await HashService.getPublicKey();
+
+      // Compute region fingerprint manifest (Layer B)
+      final fpManifest = await FingerprintService.generate(stampedWithExif);
+      final imageDimensions = fpManifest != null
+          ? '${fpManifest.imageWidth}x${fpManifest.imageHeight}'
+          : null;
+      final fpVersion = fpManifest?.fpVersion ?? 0;
+      final fpSha256 = fpManifest?.sha256Digest;
+      final regionFingerprints = fpManifest?.toCanonicalJson();
+
       final signature = await HashService.sign(
-        recordId: recordId, mediaType: 'photo', timestamp: timestamp,
-        latitude: position?.latitude, longitude: position?.longitude,
-        accuracy: position?.accuracy, altitude: position?.altitude,
-        address: address, mediaSha256: mediaSha256,
+        proto: 3,
+        recordId: recordId,
+        mediaType: 'photo',
+        timestamp: timestamp,
+        latitude: position?.latitude,
+        longitude: position?.longitude,
+        accuracy: position?.accuracy,
+        altitude: position?.altitude,
+        address: address,
+        mediaSha256: mediaSha256,
+        imageDimensions: imageDimensions,
+        fpVersion: fpVersion,
+        fpSha256: fpSha256,
       );
       try { await Gal.putImageBytes(stampedWithExif, album: 'GeoCam', name: '$recordId.jpg'); } catch (_) {}
       try {
         await HistoryStore.add(
-          id: recordId, stamped: stampedWithExif, original: rawBytes, timestamp: timestamp,
-          latitude: position?.latitude, longitude: position?.longitude, accuracy: position?.accuracy,
-          altitude: position?.altitude, address: address, signature: signature,
-          mediaSha256: mediaSha256, publicKey: publicKey,
+          protocolVersion: 3,
+          id: recordId,
+          stamped: stampedWithExif,
+          original: rawBytes,
+          timestamp: timestamp,
+          latitude: position?.latitude,
+          longitude: position?.longitude,
+          accuracy: position?.accuracy,
+          altitude: position?.altitude,
+          address: address,
+          signature: signature,
+          mediaSha256: mediaSha256,
+          publicKey: publicKey,
+          imageDimensions: imageDimensions,
+          fpVersion: fpVersion,
+          fpSha256: fpSha256,
+          regionFingerprints: regionFingerprints,
         );
         final saved = (await HistoryStore.load()).firstWhere((r) => r.id == recordId);
         if (settings.cloudVerification) unawaited(SyncService.sync(saved));

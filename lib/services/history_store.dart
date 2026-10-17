@@ -68,6 +68,11 @@ class HistoryStore {
     required String mediaSha256,
     required String publicKey,
     String syncStatus = 'pending',
+    int protocolVersion = 3,
+    String? imageDimensions,
+    int fpVersion = 0,
+    String? fpSha256,
+    String? regionFingerprints,
   }) async {
     if (kIsWeb) return;
     final dir = await _root();
@@ -78,6 +83,7 @@ class HistoryStore {
     final originalPath = stampedPath;
     await File(stampedPath).writeAsBytes(stamped, flush: true);
     await _enqueue(() => _insertAndTrim(GeoRecord(
+      protocolVersion: protocolVersion,
       id: id,
       stampedPath: stampedPath,
       originalPath: originalPath,
@@ -91,6 +97,10 @@ class HistoryStore {
       mediaSha256: mediaSha256,
       publicKey: publicKey,
       syncStatus: syncStatus,
+      imageDimensions: imageDimensions,
+      fpVersion: fpVersion,
+      fpSha256: fpSha256,
+      regionFingerprints: regionFingerprints,
     )));
   }
 
@@ -152,13 +162,8 @@ class HistoryStore {
       final index = current.indexWhere((r) => r.id == id);
       if (index < 0) return;
       final r = current[index];
-      current[index] = GeoRecord(
-        id: r.id, stampedPath: r.stampedPath, originalPath: r.originalPath,
-        mediaType: r.mediaType, timestamp: r.timestamp, latitude: r.latitude,
-        longitude: r.longitude, accuracy: r.accuracy, altitude: r.altitude,
-        address: r.address, signature: r.signature, mediaSha256: r.mediaSha256,
-        publicKey: r.publicKey, syncStatus: status,
-      );
+      // Round-trip through JSON so every field (v3 fingerprint data included) is kept.
+      current[index] = GeoRecord.fromJson({...r.toJson(), 'syncStatus': status});
       await _write(current);
     });
   }

@@ -1,4 +1,5 @@
 class GeoRecord {
+  final int protocolVersion;
   final String id;
   final String stampedPath;
   final String originalPath;
@@ -9,7 +10,7 @@ class GeoRecord {
   final double? accuracy;
   final double? altitude;
   final String address;
-  /// Ed25519 signature over the canonical metadata + final media SHA-256.
+  /// Ed25519 signature over canonical manifest.
   final String signature;
   /// SHA-256 of the exact stamped/exportable media bytes represented by this record.
   final String mediaSha256;
@@ -17,8 +18,17 @@ class GeoRecord {
   final String publicKey;
   /// pending/synced/failed. Local captures remain usable when offline.
   final String syncStatus;
+  /// Dimensions in "WIDTHxHEIGHT" format (e.g. "3024x4032").
+  final String? imageDimensions;
+  /// Fingerprint algorithm version (0 = none, 1 = grid-sha256-v1).
+  final int fpVersion;
+  /// SHA-256 digest of the canonical fingerprint manifest JSON.
+  final String? fpSha256;
+  /// Serialized canonical JSON manifest containing region hashes.
+  final String? regionFingerprints;
 
   const GeoRecord({
+    this.protocolVersion = 3,
     required this.id,
     required this.stampedPath,
     required this.originalPath,
@@ -33,13 +43,18 @@ class GeoRecord {
     this.mediaSha256 = '',
     this.publicKey = '',
     this.syncStatus = 'pending',
+    this.imageDimensions,
+    this.fpVersion = 0,
+    this.fpSha256,
+    this.regionFingerprints,
   });
 
   bool get isVideo => mediaType == 'video';
   bool get hasCryptographicProof => signature.isNotEmpty && mediaSha256.isNotEmpty && publicKey.isNotEmpty;
+  bool get hasFingerprint => fpVersion > 0 && (fpSha256?.isNotEmpty ?? false);
 
   Map<String, dynamic> toJson() => {
-        'protocolVersion': 2,
+        'protocolVersion': protocolVersion,
         'id': id,
         'stampedPath': stampedPath,
         'originalPath': originalPath,
@@ -54,9 +69,14 @@ class GeoRecord {
         'mediaSha256': mediaSha256,
         'publicKey': publicKey,
         'syncStatus': syncStatus,
+        if (imageDimensions != null) 'imageDimensions': imageDimensions,
+        'fpVersion': fpVersion,
+        if (fpSha256 != null) 'fpSha256': fpSha256,
+        if (regionFingerprints != null) 'regionFingerprints': regionFingerprints,
       };
 
   factory GeoRecord.fromJson(Map<String, dynamic> json) => GeoRecord(
+        protocolVersion: (json['protocolVersion'] as num?)?.toInt() ?? 2,
         id: json['id'] as String,
         stampedPath: json['stampedPath'] as String,
         originalPath: json['originalPath'] as String,
@@ -72,5 +92,9 @@ class GeoRecord {
         mediaSha256: (json['mediaSha256'] as String?) ?? '',
         publicKey: (json['publicKey'] as String?) ?? (json['public_key'] as String?) ?? '',
         syncStatus: (json['syncStatus'] as String?) ?? 'pending',
+        imageDimensions: (json['imageDimensions'] as String?) ?? (json['image_dimensions'] as String?),
+        fpVersion: (json['fpVersion'] as num?)?.toInt() ?? (json['fp_version'] as num?)?.toInt() ?? 0,
+        fpSha256: (json['fpSha256'] as String?) ?? (json['fp_sha256'] as String?),
+        regionFingerprints: (json['regionFingerprints'] as String?) ?? (json['region_fingerprints'] as String?),
       );
 }

@@ -119,6 +119,7 @@ class _HistoryDetailItemState extends State<HistoryDetailItem> {
       final actualHash = await HashService.sha256File(record.stampedPath);
       final mediaOk = actualHash == record.mediaSha256;
       final signatureOk = await HashService.verify(
+        proto: record.protocolVersion,
         storedSignature: record.signature,
         publicKey: record.publicKey,
         recordId: record.id,
@@ -130,6 +131,9 @@ class _HistoryDetailItemState extends State<HistoryDetailItem> {
         altitude: record.altitude,
         address: record.address,
         mediaSha256: record.mediaSha256,
+        imageDimensions: record.imageDimensions,
+        fpVersion: record.fpVersion,
+        fpSha256: record.fpSha256,
       );
       if (mounted) setState(() { _mediaHashMatches = mediaOk; _verified = mediaOk && signatureOk; });
     } catch (_) {

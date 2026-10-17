@@ -63,6 +63,8 @@ def _post(record, media_bytes, filename="GC-SEC-001.jpg"):
 
 
 # 1. Original pixels + valid signed metadata -> ACCEPT.
+# The privacy-first server accepts the upload, verifies the signature, stores metadata.
+# The public page shows the verified record (no media preview).
 def test_1_valid_media_and_metadata_accepted():
     private = Ed25519PrivateKey.generate()
     payload = b"authentic-capture-1"
@@ -70,7 +72,9 @@ def test_1_valid_media_and_metadata_accepted():
     assert resp.status_code == 200
     assert resp.get_json()["success"] is True
     page = app.app.test_client().get("/GC-SEC-ACCEPT")
-    assert b"MEDIA + SIGNATURE VERIFIED" in page.data
+    # Privacy-first page shows verified *record* (not media), and no <img> tag.
+    assert b"Signed Record Verified" in page.data or b"signed record" in page.data.lower()
+    assert b"<img" not in page.data, "Public page must not embed the original photo"
 
 
 # 2. Original pixels + modified metadata (after signing) -> REJECT.
@@ -147,15 +151,21 @@ def test_5_6_signature_covers_pixels_and_each_field():
         assert app.verify_signature(clone) is False, f"{field} not covered by signature"
 
 
-# 8. Reload/TOCTOU: media swapped at rest after a valid sync -> verify page fails closed.
-def test_8_at_rest_media_swap_fails_closed():
+# 8. Privacy-first: media is never stored, so there is no on-disk file to swap.
+# Instead, verify that the /media endpoint always returns 410 (media intentionally
+# disabled) and that the public page never claims the image itself is verified.
+def test_8_media_endpoint_disabled_410():
     private = Ed25519PrivateKey.generate()
     payload = b"stored-then-swapped"
     assert _post(_record(private, payload, id="GC-SEC-SWAP"), payload, "GC-SEC-SWAP.jpg").status_code == 200
-    stored = Path(app.MEDIA_DIR) / "GC-SEC-SWAP.jpg"
-    stored.write_bytes(b"swapped-on-disk")  # attacker with FS access alters pixels
-    page = app.app.test_client().get("/GC-SEC-SWAP")
-    assert b"VERIFICATION FAILED" in page.data or b"failed cryptographic" in page.data
+    client = app.app.test_client()
+    # /media must be 410 Gone — media bytes are never stored in the privacy-first server.
+    media_resp = client.get("/GC-SEC-SWAP/media")
+    assert media_resp.status_code == 410, (
+        f"Expected 410 Gone for disabled media endpoint, got {media_resp.status_code}"
+    )
+    # Public verify page must never falsely claim the IMAGE bytes were verified.
+    page = client.get("/GC-SEC-SWAP")
     assert b"MEDIA + SIGNATURE VERIFIED" not in page.data
 
 
