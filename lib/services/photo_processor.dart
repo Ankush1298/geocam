@@ -254,6 +254,7 @@ class PhotoProcessor {
   }
 
   static String formatDateTime(DateTime t) {
+    t = t.toLocal(); // captures are stored as UTC; the stamp must show the phone's local wall time
     final day = t.day.toString().padLeft(2, '0');
     final month = t.month.toString().padLeft(2, '0');
     final hour = t.hour.toString().padLeft(2, '0');

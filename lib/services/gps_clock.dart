@@ -95,7 +95,10 @@ class GpsClockTracker {
 
 /// Wording shared by the result screen. Always a consistency check, never a verified time.
 String describeGpsClockOffset(int? offsetMs) {
-  if (offsetMs == null) return 'No GPS time reference was recorded for this capture.';
+  if (offsetMs == null) {
+    return 'No GPS time reference was recorded for this capture. '
+        'It needs a live satellite fix: take photos outdoors with Location on and wait for the GPS lock.';
+  }
   final s = (offsetMs / 1000).round();
   final abs = s.abs();
   final span = abs >= 120 ? '${(abs / 60).round()} min' : '$abs s';

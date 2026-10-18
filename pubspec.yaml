@@ -1,7 +1,7 @@
 name: geocam
 description: GeoCam - location-aware camera prototype.
 publish_to: none
-version: 0.9.0+34
+version: 0.9.0+36
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
