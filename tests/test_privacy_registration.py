@@ -25,6 +25,8 @@ import hashlib
 import json
 import os
 import sys
+import atexit
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -36,6 +38,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 # test file in the same session (e.g. test_server_protocol.py).
 if "GEOCAM_DB" not in os.environ:
     _tmp_priv = tempfile.mkdtemp(prefix="geocam_priv_test_")
+    atexit.register(shutil.rmtree, _tmp_priv, ignore_errors=True)
     os.environ["GEOCAM_DATA_DIR"] = _tmp_priv
     os.environ["GEOCAM_DB"] = str(Path(_tmp_priv) / "records_priv.sqlite3")
 os.environ.pop("GEOCAM_TRUSTED_PUBLIC_KEYS", None)
@@ -415,7 +418,8 @@ def test_21_canonical_matches_dart_golden_vector():
 
 def test_22_v3_record_verifies_after_storage():
     private = _gen_key()
-    manifest = json.dumps({"gridRows": 1, "gridCols": 1, "regions": ["a" * 64]}, sort_keys=True)
+    manifest = json.dumps({"algorithm": "grid-sha256-v1", "gridRows": 1, "gridCols": 1,
+                           "regions": ["a" * 64]}, sort_keys=True)
     rec = _make_record(private, record_id="GC-PRIV-T22", proto=3, fp_version=1,
                        fp_sha256=hashlib.sha256(manifest.encode()).hexdigest(),
                        image_dimensions="10x10", region_fingerprints=manifest)
@@ -425,7 +429,11 @@ def test_22_v3_record_verifies_after_storage():
 
 
 def _signed_with_manifest(record_id, manifest):
-    rec = _make_record(_gen_key(), record_id=record_id, proto=3, fp_version=1,
+    try:
+        fp_version = 2 if json.loads(manifest).get("algorithm") == "grid-luma-v2" else 1
+    except (ValueError, AttributeError):
+        fp_version = 1
+    rec = _make_record(_gen_key(), record_id=record_id, proto=3, fp_version=fp_version,
                        fp_sha256=hashlib.sha256(manifest.encode()).hexdigest(),
                        image_dimensions="10x10", region_fingerprints=manifest)
     return _post_register(rec)
@@ -491,3 +499,96 @@ def test_28_public_page_makes_no_pixel_or_identity_claims():
     assert "registered device" not in page
     for banned in ("unmodified</", "not cropped", "pixels match", "authentic photo"):
         assert banned not in page.lower()
+
+
+def test_29_luma_v2_manifest_accepted_and_bad_tiles_rejected():
+    tile = "ffff0000ffff0000" + "7f" + "0"
+    ok = json.dumps({"algorithm": "grid-luma-v2", "fpVersion": 2, "gridRows": 1, "gridCols": 2,
+                     "imageWidth": 10, "imageHeight": 10, "regions": [tile, tile]})
+    assert _signed_with_manifest("GC-PRIV-T29A", ok).status_code == 200
+    bad = json.dumps({"algorithm": "grid-luma-v2", "gridRows": 1, "gridCols": 1, "regions": ["a" * 64]})
+    assert _signed_with_manifest("GC-PRIV-T29B", bad).status_code == 400
+    unknown = json.dumps({"algorithm": "evil-v9", "gridRows": 1, "gridCols": 1, "regions": [tile]})
+    assert _signed_with_manifest("GC-PRIV-T29C", unknown).status_code == 400
+
+
+def test_30_registration_time_is_server_side_and_labelled():
+    assert _post_register(_make_record(_gen_key(), record_id="GC-PRIV-T30")).status_code == 200
+    api = _client().get("/api/record/GC-PRIV-T30").get_json()
+    assert api["registeredAt"] and api["registeredAt"].endswith("Z")
+    page = _client().get("/GC-PRIV-T30").get_data(as_text=True)
+    assert "Registered on server" in page and "not independently verified" in page
+
+
+# ---- client IP selection for rate limiting (Render: header configuration is unverified) ----
+
+def _ip(headers=None, header_name="", remote="10.0.0.1"):
+    old = _app._CLIENT_IP_HEADER
+    _app._CLIENT_IP_HEADER = header_name
+    try:
+        with flask_app.test_request_context("/api/record/x", headers=headers or {},
+                                            environ_base={"REMOTE_ADDR": remote}):
+            return _app._client_ip()
+    finally:
+        _app._CLIENT_IP_HEADER = old
+
+
+def test_31_client_ip_ignores_all_forwarding_headers_by_default():
+    h = {"X-Forwarded-For": "6.6.6.6, 7.7.7.7", "CF-Connecting-IP": "8.8.8.8", "X-Real-IP": "9.9.9.9"}
+    assert _ip(h) == "10.0.0.1"
+    assert _ip({}) == "10.0.0.1"
+
+
+def test_32_configured_header_is_used_only_when_it_is_one_valid_ip():
+    cf = "CF-Connecting-IP"
+    assert _ip({cf: "203.0.113.7"}, cf) == "203.0.113.7"
+    assert _ip({cf: " 203.0.113.7 "}, cf) == "203.0.113.7"
+    assert _ip({cf: "2001:db8::1"}, cf) == "2001:db8::1"
+    for bad in ["", "garbage", "203.0.113.7, 198.51.100.1", "203.0.113.999", "203.0.113.7:8080",
+                "1.2.3.4\x00", "' OR 1=1", "a" * 5000]:
+        assert _ip({cf: bad}, cf) == "10.0.0.1", bad
+    assert _ip({}, cf) == "10.0.0.1"                              # header missing
+    assert _ip({"X-Forwarded-For": "5.5.5.5"}, cf) == "10.0.0.1"  # XFF still ignored
+
+
+def test_33_rate_limit_buckets_follow_the_trusted_header_not_forgeable_ones(monkeypatch):
+    monkeypatch.setattr(_app, "_RATE_LIMIT", 2)
+    monkeypatch.setattr(_app, "_CLIENT_IP_HEADER", "CF-Connecting-IP")
+    _app._rate_hits.clear()
+    def hit(ip, xff="1.1.1.1"):
+        return _client().get("/api/record/GC-NOPE-3",
+                             headers={"CF-Connecting-IP": ip, "X-Forwarded-For": xff}).status_code
+    assert [hit("203.0.113.1", f"9.9.9.{i}") for i in range(3)] == [404, 404, 429]  # forged XFF no help
+    assert hit("203.0.113.2") == 404                                                 # other client unaffected
+    _app._rate_hits.clear()
+
+
+def _limit_in_fresh_process(**env):
+    import subprocess, sys
+    code = ("import os,sys,atexit,shutil,tempfile; d=tempfile.mkdtemp(); atexit.register(shutil.rmtree,d,True);"
+            "os.environ['GEOCAM_DATA_DIR']=d; os.environ['GEOCAM_DB']=d+'/x.sqlite3';"
+            "[os.environ.pop(k,None) for k in ('GEOCAM_ENV','GEOCAM_RATE_LIMIT_PER_MIN')];"
+            "os.environ.update(%r); sys.path.insert(0, %r); import app; print(app._RATE_LIMIT)"
+            % (env, str(Path(__file__).resolve().parent.parent)))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    return out.stdout.strip(), out.stderr
+
+
+def test_34_rate_limit_is_on_by_default_outside_tests():
+    assert _limit_in_fresh_process()[0] == "60"
+    assert _limit_in_fresh_process(GEOCAM_RATE_LIMIT_PER_MIN="10")[0] == "10"
+
+
+def test_35_rate_limit_can_only_be_disabled_in_the_test_environment():
+    for off in ("0", "-1", "abc", ""):
+        assert _limit_in_fresh_process(GEOCAM_RATE_LIMIT_PER_MIN=off)[0] == "60", off
+    assert _limit_in_fresh_process(GEOCAM_RATE_LIMIT_PER_MIN="0", GEOCAM_ENV="production")[0] == "60"
+    assert _limit_in_fresh_process(GEOCAM_RATE_LIMIT_PER_MIN="0", GEOCAM_ENV="test")[0] == "0"
+
+
+def test_36_render_yaml_leaves_the_client_ip_header_unset():
+    text = (Path(__file__).resolve().parent.parent / "render.yaml").read_text()
+    i = text.index("GEOCAM_CLIENT_IP_HEADER")
+    block = text[i:].split("- key:")[0]
+    assert "sync: false" in block and "value:" not in block
+    assert "GEOCAM_RATE_LIMIT_PER_MIN" not in text and "GEOCAM_ENV" not in text

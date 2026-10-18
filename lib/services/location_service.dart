@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
 class LocationService {
@@ -79,5 +80,19 @@ class LocationService {
         distanceFilter: 3,
       ),
     );
+  }
+
+  /// Fixes straight from the platform GPS provider (no network/fused estimates), used
+  /// only as a satellite time reference. Emits about once a second while outdoors.
+  Stream<Position> gpsTimeStream() {
+    final LocationSettings settings = defaultTargetPlatform == TargetPlatform.android
+        ? AndroidSettings(
+            accuracy: LocationAccuracy.best,
+            distanceFilter: 0,
+            intervalDuration: const Duration(seconds: 1),
+            forceLocationManager: true,
+          )
+        : const LocationSettings(accuracy: LocationAccuracy.best, distanceFilter: 0);
+    return Geolocator.getPositionStream(locationSettings: settings);
   }
 }

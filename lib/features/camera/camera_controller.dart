@@ -17,6 +17,7 @@ import '../../services/photo_processor.dart';
 import '../../services/video_processor.dart';
 import '../../services/fingerprint_service.dart';
 import '../../services/record_id_service.dart';
+import '../../services/gps_clock.dart';
 import '../../services/sync_service.dart';
 
 class VideoCaptureResult {
@@ -96,6 +97,8 @@ class GeoCameraController extends ChangeNotifier {
   double? _pendingZoom;
 
   StreamSubscription<Position>? _positionSubscription;
+  StreamSubscription<Position>? _gpsClockSubscription;
+  final GpsClockTracker gpsClock = GpsClockTracker();
 
   GeoCameraController({
     required this.cameras,
@@ -248,6 +251,12 @@ class GeoCameraController extends ChangeNotifier {
         }
       }
 
+      await _gpsClockSubscription?.cancel();
+      gpsClock.reset(); // a restarted stream must not be linked to fixes from before the restart
+      _gpsClockSubscription = locationService.gpsTimeStream().listen(
+        gpsClock.onFix,
+        onError: (_) {}, // no satellite fix is fine: the capture just has no GPS time reference
+      );
       await _positionSubscription?.cancel();
       _positionSubscription = locationService.watch().listen((next) {
         position = next;
@@ -534,7 +543,7 @@ class GeoCameraController extends ChangeNotifier {
         shotPath: shot.path, rawBytes: rawBytes, position: positionAtCapture,
         address: addressAtCapture, timestamp: capturedAt, recordId: recordId,
         settings: selectedSettings, frame: selectedFrame, screenAspect: capturedScreenAspect,
-        isFrontCamera: front,
+        isFrontCamera: front, gpsClockOffsetMs: gpsClock.offsetFor(capturedAt),
       );
       lastCapture = capturedAt;
       return CaptureResult(
@@ -592,6 +601,7 @@ class GeoCameraController extends ChangeNotifier {
     required CameraFrame frame,
     required double screenAspect,
     required bool isFrontCamera,
+    int? gpsClockOffsetMs,
   }) async {
     await Future<void>.delayed(const Duration(milliseconds: 80));
     final stamped = await photoProcessor.stamp(
@@ -608,7 +618,7 @@ class GeoCameraController extends ChangeNotifier {
       final publicKey = await HashService.getPublicKey();
 
       // Compute region fingerprint manifest (Layer B)
-      final fpManifest = await FingerprintService.generate(stampedWithExif);
+      final fpManifest = await FingerprintService.generate(stampedWithExif, gpsClockOffsetMs: gpsClockOffsetMs);
       final imageDimensions = fpManifest != null
           ? '${fpManifest.imageWidth}x${fpManifest.imageHeight}'
           : null;
@@ -686,6 +696,7 @@ class GeoCameraController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _positionSubscription?.cancel();
+    _gpsClockSubscription?.cancel();
     camera?.dispose();
     super.dispose();
   }

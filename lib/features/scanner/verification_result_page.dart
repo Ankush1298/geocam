@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:file_picker/file_picker.dart';
 
 import 'package:flutter/material.dart';
@@ -8,6 +10,7 @@ import '../../services/hash_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../models/geo_record.dart';
 import '../../services/fingerprint_service.dart';
+import '../../services/gps_clock.dart';
 import '../../services/history_store.dart';
 import '../../services/sync_service.dart';
 
@@ -101,8 +104,11 @@ class _VerificationResultPageState extends State<VerificationResultPage> {
     RegionFingerprintManifest? manifest;
     final rawFp = data['regionFingerprints'] as String?;
     if (sigOk && rawFp != null && rawFp.isNotEmpty && rawFp.length <= 256 * 1024) {
+      // Hash the exact string the server returned (not a re-serialisation), so a manifest
+      // carrying fields this build does not know still verifies against the signed hash.
       final m = RegionFingerprintManifest.parseJson(rawFp);
-      if (m != null && m.sha256Digest == data['fpSha256'] && m.isWellFormed) manifest = m;
+      final rawHash = crypto.sha256.convert(utf8.encode(rawFp)).toString();
+      if (m != null && rawHash == data['fpSha256'] && m.isWellFormed) manifest = m;
     }
     if (!mounted) return;
 
@@ -493,6 +499,11 @@ class _VerificationResultPageState extends State<VerificationResultPage> {
         accentColor = const Color(0xFFE53935);
         icon = Icons.warning_amber_rounded;
         break;
+      case VerificationOutcome.reencodedContentConsistent:
+        bgColor = const Color(0xFF382F18);
+        accentColor = AppTheme.amber;
+        icon = Icons.compare;
+        break;
       case VerificationOutcome.recordAuthenticImageUnchecked:
         bgColor = const Color(0xFF382F18);
         accentColor = AppTheme.amber;
@@ -779,7 +790,9 @@ class _VerificationResultPageState extends State<VerificationResultPage> {
           ),
           const Divider(height: 20),
           _fieldRow('Record ID', record['id'] ?? '—'),
-          _fieldRow('Timestamp', record['timestamp'] ?? '—'),
+          _fieldRow('Captured (device clock, not independently verified)', record['timestamp'] ?? '—'),
+          _fieldRow('Registered on server (not the capture time)', record['registeredAt'] ?? 'Not recorded (older record)'),
+          _fieldRow('Phone clock vs GPS', describeGpsClockOffset(_manifest?.gpsClockOffsetMs)),
           _fieldRow('Media Type', record['mediaType'] ?? 'photo'),
           if (record['imageDimensions'] != null)
             _fieldRow('Original Dimensions', record['imageDimensions']),

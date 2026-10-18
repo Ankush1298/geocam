@@ -14,6 +14,7 @@ Legacy (backward-compatible):
 """
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import time
@@ -44,8 +45,29 @@ app.config["MAX_CONTENT_LENGTH"] = (
 # Maximum size (bytes) for the metadata-only /register body.
 _MAX_REGISTER_BYTES = int(os.environ.get("MAX_REGISTER_BYTES", str(512 * 1024)))  # 512 KB
 
-_RATE_LIMIT = int(os.environ.get("GEOCAM_RATE_LIMIT_PER_MIN", "60"))
+# Rate limiting can only be switched off (<= 0) when GEOCAM_ENV=test; elsewhere a value <= 0 or an
+# unparsable one falls back to the default of 60/min, so a stray production setting cannot disable it.
+try:
+    _RATE_LIMIT = int(os.environ.get("GEOCAM_RATE_LIMIT_PER_MIN", "60"))
+except ValueError:
+    _RATE_LIMIT = 60
+if _RATE_LIMIT <= 0 and os.environ.get("GEOCAM_ENV") != "test":
+    _RATE_LIMIT = 60
+# Name of a header that a TRUSTED proxy sets to the real client IP and overwrites if the caller
+# sends it (e.g. Cloudflare's CF-Connecting-IP). Empty = trust no header at all. X-Forwarded-For is
+# never used: its leftmost entries are client-controlled and its layout depends on the proxy chain.
+_CLIENT_IP_HEADER = os.environ.get("GEOCAM_CLIENT_IP_HEADER", "").strip()
 _rate_hits = {}
+
+
+def _client_ip():
+    if _CLIENT_IP_HEADER:
+        raw = request.headers.get(_CLIENT_IP_HEADER, "").strip()
+        try:
+            return str(ipaddress.ip_address(raw))  # must be exactly one valid IP, nothing else
+        except ValueError:
+            pass  # missing/malformed/multi-entry: fall back to the socket peer
+    return request.remote_addr or "unknown"
 
 
 @app.before_request
@@ -54,8 +76,7 @@ def _rate_limit():
     if request.path != "/register" and not request.path.startswith("/api/") or _RATE_LIMIT <= 0:
         return None
     now = time.time()
-    # Rightmost entry is the one appended by the platform proxy; the leftmost is client-controlled.
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[-1].strip()
+    ip = _client_ip()
     hits = [t for t in _rate_hits.get(ip, []) if now - t < 60]
     if len(hits) >= _RATE_LIMIT:
         _rate_hits[ip] = hits
@@ -170,7 +191,13 @@ h1{font-size:1.3rem;margin:0 0 2px}
 <div class="card">
   <div class="field"><span class="label">Record ID:</span> {{ result.id }}</div>
   <div class="field"><span class="label">Media type:</span> {{ result.mediaType }}</div>
-  <div class="field"><span class="label">Captured:</span> {{ result.timestamp }}</div>
+  <div class="field"><span class="label">Captured (device clock, not independently verified):</span> {{ result.timestamp }}</div>
+  <div class="field"><span class="label">Registered on server (not the capture time):</span> {{ result.registeredAt or "Not recorded (older record)" }}</div>
+  <div class="field"><span class="label">Clock check (phone vs GPS time):</span>
+    {% if result.manifestVerified is false %}GPS clock data could not be verified: the stored fingerprint data does not match the signed hash.
+    {% elif result.gpsClockOffsetMs is none %}No GPS time reference was recorded.
+    {% elif result.gpsClockOffsetMs|abs <= 120000 %}At capture the phone clock was within 2 minutes of GPS time ({{ (result.gpsClockOffsetMs / 1000)|round|int }} s apart). This is a clock-consistency check only; it does not prove when the photo was taken.
+    {% else %}<strong>At capture the phone clock differed from GPS time by {{ (result.gpsClockOffsetMs / 1000)|round|int }} s</strong>, so the captured time may be wrong. Consistency check only.{% endif %}</div>
   {% if result.imageDimensions %}<div class="field"><span class="label">Dimensions:</span> {{ result.imageDimensions }}</div>{% endif %}
   <div class="field"><span class="label">Device key:</span> {{ result.keyFingerprint }}</div>
   {% if result.fpVersion is not none and result.fpVersion > 0 %}
@@ -334,7 +361,16 @@ def row_to_result(row):
     result["mediaType"] = result.pop("media_type")
     result["mediaSha256"] = result.pop("media_sha256")
     result["publicKey"] = result.pop("public_key")
+    result["registeredAt"] = result.get("created_at") or None
     result["sig_ok"] = verify_signature(result)
+    # The GPS-clock offset lives inside the stored manifest, which is only authenticated through
+    # the signed fp_sha256. Hash the raw stored string (never a re-serialisation) before showing it.
+    raw = result.get("region_fingerprints")
+    result["manifestVerified"] = (
+        None if not raw else bool(
+            result["sig_ok"] and result.get("fp_sha256")
+            and hashlib.sha256(raw.encode("utf-8")).hexdigest() == result["fp_sha256"]))
+    result["gpsClockOffsetMs"] = _gps_clock_offset_ms(raw) if result["manifestVerified"] else None
     # Rename snake_case extras
     result["imageDimensions"] = result.pop("image_dimensions", None)
     result["fpVersion"] = result.pop("fp_version", 0)
@@ -343,17 +379,64 @@ def row_to_result(row):
     return result
 
 
-def _check_manifest_shape(raw):
-    """Bound the stored fingerprint manifest so it cannot be used to waste resources."""
+_REGION_PATTERNS = {
+    "grid-sha256-v1": SHA256_RE,                                   # exact pixel digests
+    "grid-luma-v2": re.compile(r"^[0-9a-f]{16}[0-9a-f]{2}[01]$"),  # tolerant luma tiles
+}
+_ALGORITHM_VERSION = {"grid-sha256-v1": 1, "grid-luma-v2": 2}
+# Largest grid per algorithm. The app's crop search for luma-v2 grows roughly with the fourth
+# power of the grid side, so it is capped at 16x16 (real records use 8x8); v1 has no crop search.
+_MAX_GRID = {"grid-sha256-v1": 64, "grid-luma-v2": 16}
+_MAX_CLOCK_OFFSET_MS = 366 * 24 * 3600 * 1000
+
+
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _check_manifest_shape(raw, record=None):
+    """Strictly validate the stored fingerprint manifest before trusting or storing it."""
     try:
         m = json.loads(raw)
-        rows, cols, regions = m["gridRows"], m["gridCols"], m["regions"]
-    except (ValueError, KeyError, TypeError):
-        raise ValueError("regionFingerprints is not a valid manifest")
-    if (not isinstance(rows, int) or not isinstance(cols, int) or not isinstance(regions, list)
-            or not 0 < rows <= 64 or not 0 < cols <= 64 or len(regions) != rows * cols
-            or not all(isinstance(x, str) and SHA256_RE.fullmatch(x) for x in regions)):
+    except ValueError:
+        raise ValueError("regionFingerprints is not valid JSON")
+    if not isinstance(m, dict):
+        raise ValueError("regionFingerprints must be a JSON object")
+    algorithm = m.get("algorithm", "grid-sha256-v1")
+    pattern = _REGION_PATTERNS.get(algorithm) if isinstance(algorithm, str) else None
+    if pattern is None:
+        raise ValueError("Unsupported fingerprint algorithm")
+    rows, cols, regions = m.get("gridRows"), m.get("gridCols"), m.get("regions")
+    if (not _is_int(rows) or not _is_int(cols) or not isinstance(regions, list)
+            or not 0 < rows <= _MAX_GRID[algorithm] or not 0 < cols <= _MAX_GRID[algorithm]
+            or len(regions) != rows * cols
+            or not all(isinstance(x, str) and pattern.fullmatch(x) for x in regions)):
         raise ValueError("regionFingerprints manifest has an invalid grid")
+    width, height = m.get("imageWidth"), m.get("imageHeight")
+    if algorithm == "grid-luma-v2" and (
+            not _is_int(width) or not _is_int(height)
+            or not 0 < width <= 100000 or not 0 < height <= 100000):
+        raise ValueError("regionFingerprints manifest has invalid image dimensions")
+    if "fpVersion" in m and (not _is_int(m["fpVersion"]) or m["fpVersion"] != _ALGORITHM_VERSION[algorithm]):
+        raise ValueError("regionFingerprints fpVersion does not match its algorithm")
+    offset = m.get("gpsClockOffsetMs")
+    if offset is not None and (not _is_int(offset) or abs(offset) > _MAX_CLOCK_OFFSET_MS):
+        raise ValueError("gpsClockOffsetMs is out of range")
+    if record is not None:
+        dims = record.get("imageDimensions")
+        if dims and _is_int(width) and _is_int(height) and dims != f"{width}x{height}":
+            raise ValueError("imageDimensions does not match the fingerprint manifest")
+        if _is_int(record.get("fpVersion")) and record["fpVersion"] != _ALGORITHM_VERSION[algorithm]:
+            raise ValueError("fpVersion does not match the fingerprint manifest")
+
+
+def _gps_clock_offset_ms(raw):
+    """Offset recorded inside the (signed) manifest, or None. Safe on bad data."""
+    try:
+        v = json.loads(raw).get("gpsClockOffsetMs")
+        return v if _is_int(v) and abs(v) <= _MAX_CLOCK_OFFSET_MS else None
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 def _check_trusted_key(record):
@@ -406,7 +489,9 @@ def register_record():
             if not isinstance(dims, str) or not re.fullmatch(r"\d+x\d+", dims):
                 raise ValueError("imageDimensions must be '<width>x<height>'")
 
-        fp_version = int(record.get("fpVersion") or 0)
+        fp_version = record.get("fpVersion") or 0
+        if not _is_int(fp_version) or not 0 <= fp_version <= 2:
+            raise ValueError("fpVersion must be 0, 1 or 2")
         fp_sha256 = record.get("fpSha256") or ""
         if fp_version > 0 and fp_sha256 and not SHA256_RE.fullmatch(fp_sha256):
             raise ValueError("fpSha256 must be a 64-character lowercase hex string")
@@ -419,7 +504,7 @@ def register_record():
                 raise ValueError("regionFingerprints manifest is too large (max 256 KB)")
             if hashlib.sha256(region_fps.encode("utf-8")).hexdigest() != fp_sha256:
                 raise ValueError("fpSha256 does not match regionFingerprints")
-            _check_manifest_shape(region_fps)
+            _check_manifest_shape(region_fps, record)
 
         existing = store.get_record(record["id"])
         if existing:
@@ -521,6 +606,9 @@ def api_record(record_id):
         "id": result["id"],
         "protocolVersion": row.get("protocol_version", 2),
         "timestamp": result["timestamp"],
+        "registeredAt": result.get("registeredAt"),
+        "gpsClockOffsetMs": result.get("gpsClockOffsetMs"),
+        "manifestVerified": result.get("manifestVerified"),
         "mediaType": result["mediaType"],
         "latitude": result.get("latitude"),
         "longitude": result.get("longitude"),

@@ -6,6 +6,7 @@ import 'package:image/image.dart' as img;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:geocam/services/fingerprint_service.dart';
 import 'package:geocam/services/hash_service.dart';
+import 'package:geocam/services/luma_fingerprint.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -88,7 +89,7 @@ void main() {
     test('Layer A & B: 1-pixel modification fails exact-file and is flagged in region analysis', () async {
       final originalJpg = makeTestJpeg(128, 128);
       final expectedSha = crypto.sha256.convert(originalJpg).toString();
-      final manifest = await FingerprintService.generate(originalJpg, gridRows: 4, gridCols: 4);
+      final manifest = await FingerprintService.generate(originalJpg, gridRows: 4, gridCols: 4, algorithm: RegionFingerprintManifest.legacyAlgorithm);
 
       // Decode, modify 1 pixel in top-left region (0, 0), and re-encode
       final decoded = img.decodeImage(originalJpg)!;
@@ -131,7 +132,8 @@ void main() {
       expect(result.outcome, VerificationOutcome.modificationDetected);
       expect(result.exactFileMatch, isFalse);
       expect(result.regionCheckPassed, isFalse);
-      expect(result.summary.toLowerCase(), contains('cropping'));
+      expect(result.summary, contains('Framing differs'));
+      expect(result.regionMatches, isNull); // no made-up edit locations for an unaligned crop
       expect(result.originalDimensions, '128x128');
       expect(result.testedDimensions, '112x128');
     });
@@ -172,6 +174,7 @@ void main() {
     test('Malformed image bytes return UNABLE TO VERIFY', () async {
       final garbage = Uint8List.fromList([1, 2, 3, 4, 5, 6, 7, 8]);
       final manifest = RegionFingerprintManifest(
+        algorithm: RegionFingerprintManifest.legacyAlgorithm,
         imageWidth: 64,
         imageHeight: 64,
         regions: List.filled(64, 'hash'),
@@ -256,7 +259,7 @@ void main() {
   });
 
   group('Additional integrity cases', () {
-    test('resized copy is flagged, never authentic', () async {
+    test('resized copy is consistent but never EXACT MATCH', () async {
       final jpg = makeTestJpeg(128, 128);
       final manifest = await FingerprintService.generate(jpg, gridRows: 4, gridCols: 4);
       final small = img.copyResize(img.decodeImage(jpg)!, width: 64, height: 64);
@@ -266,8 +269,8 @@ void main() {
         signatureValid: true,
         manifest: manifest,
       );
-      expect(r.outcome, VerificationOutcome.modificationDetected);
       expect(r.isAuthentic, isFalse);
+      expect(r.exactFileMatch, isFalse);
     });
 
     test('recompressed same-size copy is not an exact match', () async {
@@ -329,6 +332,109 @@ void main() {
         address: 'a', mediaSha256: sha256);
       expect(await check(sha), isTrue);
       expect(await check(crypto.sha256.convert([2]).toString()), isFalse);
+    });
+  });
+
+  group('Tolerant luma fingerprints (grid-luma-v2)', () {
+    // Deterministic random 8px colour blocks: every tile has real structure.
+    img.Image blocky(int size, int seed) {
+      final image = img.Image(width: size, height: size);
+      var state = seed;
+      int next() {
+        state = (state * 1103515245 + 12345) & 0x7fffffff;
+        return state;
+      }
+      for (var by = 0; by < size ~/ 8; by++) {
+        for (var bx = 0; bx < size ~/ 8; bx++) {
+          final c = img.ColorRgb8(next() % 256, next() % 256, next() % 256);
+          for (var y = 0; y < 8; y++) {
+            for (var x = 0; x < 8; x++) {
+              image.setPixel(bx * 8 + x, by * 8 + y, c);
+            }
+          }
+        }
+      }
+      return image;
+    }
+
+    Uint8List jpg(img.Image i, {int q = 95}) => Uint8List.fromList(img.encodeJpg(i, quality: q));
+
+    Future<(Uint8List, String, RegionFingerprintManifest)> original() async {
+      final bytes = jpg(blocky(256, 7));
+      final m = await FingerprintService.generate(bytes);
+      return (bytes, crypto.sha256.convert(bytes).toString(), m!);
+    }
+
+    Future<VerificationResult> check(Uint8List received, String sha, RegionFingerprintManifest m) =>
+        FingerprintService.verify(receivedBytes: received, expectedMediaSha256: sha, signatureValid: true, manifest: m);
+
+    test('manifest is v2, well formed, and tiles round-trip', () async {
+      final (_, _, m) = await original();
+      expect(m.algorithm, lumaAlgorithm);
+      expect(m.fpVersion, 2);
+      expect(m.isWellFormed, isTrue);
+      expect(Tile.parse(m.regions.first).toString(), m.regions.first);
+    });
+
+    test('recompression is consistent, not an exact match', () async {
+      final (bytes, sha, m) = await original();
+      final r = await check(jpg(img.decodeImage(bytes)!, q: 50), sha, m);
+      expect(r.outcome, VerificationOutcome.reencodedContentConsistent);
+      expect(r.exactFileMatch, isFalse);
+      expect(r.isAuthentic, isFalse);
+    });
+
+    test('downscaled copy is consistent', () async {
+      final (bytes, sha, m) = await original();
+      final small = img.copyResize(img.decodeImage(bytes)!, width: 128, height: 128);
+      final r = await check(jpg(small, q: 80), sha, m);
+      expect(r.outcome, VerificationOutcome.reencodedContentConsistent);
+      expect(r.testedDimensions, '128x128');
+    });
+
+    test('a pasted-over patch is flagged on the right tiles', () async {
+      final (bytes, sha, m) = await original();
+      final edited = img.decodeImage(bytes)!;
+      img.fillRect(edited, x1: 70, y1: 70, x2: 110, y2: 110, color: img.ColorRgb8(255, 255, 255));
+      final r = await check(jpg(edited), sha, m);
+      expect(r.outcome, VerificationOutcome.modificationDetected);
+      expect(r.regionMatches![0], isTrue); // far corner untouched
+      expect(r.regionMatches![2 * 8 + 2], isFalse); // tile (row 2, col 2) holds the patch
+    });
+
+    test('brightness change is flagged', () async {
+      final (bytes, sha, m) = await original();
+      final bright = img.adjustColor(img.decodeImage(bytes)!, brightness: 1.5);
+      final r = await check(jpg(bright), sha, m);
+      expect(r.outcome, VerificationOutcome.modificationDetected);
+    });
+
+    test('grid-aligned crop is located', () async {
+      final (bytes, sha, m) = await original();
+      final cropped = img.copyCrop(img.decodeImage(bytes)!, x: 64, y: 0, width: 192, height: 256);
+      final r = await check(jpg(cropped), sha, m);
+      expect(r.outcome, VerificationOutcome.modificationDetected);
+      expect(r.summary, contains('columns 3-8'));
+    });
+
+    test('unaligned crop is flagged without claiming a location', () async {
+      final (bytes, sha, m) = await original();
+      final cropped = img.copyCrop(img.decodeImage(bytes)!, x: 13, y: 5, width: 200, height: 240);
+      final r = await check(jpg(cropped), sha, m);
+      expect(r.outcome, VerificationOutcome.modificationDetected);
+      expect(r.isAuthentic, isFalse);
+    });
+
+    test('a different photo is flagged', () async {
+      final (_, sha, m) = await original();
+      final r = await check(jpg(blocky(256, 99)), sha, m);
+      expect(r.outcome, VerificationOutcome.modificationDetected);
+    });
+
+    test('tampered tile strings make the manifest malformed', () {
+      final m = RegionFingerprintManifest(
+          imageWidth: 8, imageHeight: 8, gridRows: 1, gridCols: 1, regions: ['not-a-tile']);
+      expect(m.isWellFormed, isFalse);
     });
   });
 }

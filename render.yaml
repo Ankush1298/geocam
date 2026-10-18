@@ -13,6 +13,8 @@ services:
       # Fill these in the Render dashboard; they are secrets so they are not stored here.
       - key: DATABASE_URL        # Postgres connection string (Supabase / Neon)
         sync: false
+      - key: GEOCAM_CLIENT_IP_HEADER   # header a TRUSTED proxy sets to the client IP, e.g. CF-Connecting-IP.
+        sync: false                    # UNVERIFIED for this service: leave empty (socket peer is used) until checked.
       - key: S3_ENDPOINT_URL     # e.g. https://<account>.r2.cloudflarestorage.com
         sync: false
       - key: S3_BUCKET

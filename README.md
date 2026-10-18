@@ -9,7 +9,7 @@ GeoCam is an Android camera and verification architecture providing zero-knowled
 - **Zero Media Storage on Server**: Photos and videos **never leave the user's device**. The verification server receives only cryptographic hashes, metadata, and region fingerprints—zero image/video bytes are transmitted or stored.
 - **Dual-Layer Authenticity Verification**:
   - **Layer A (Exact-File Digest)**: SHA-256 over exact authenticated media bytes ensures byte-for-byte fidelity.
-  - **Layer B (Region Fingerprint Grid)**: Authenticated 8×8 grid of region SHA-256 digests (`grid-sha256-v1`) enables localized tampering, stamp-removal, and cropping detection without ever transmitting pixels.
+  - **Layer B (Region Fingerprint Grid)**: New photos use `grid-luma-v2`, a signed 8×8 grid of tolerant brightness-pattern tiles. Resized or recompressed copies (e.g. sent through messaging apps) are reported as `FILE CHANGED, CONTENT CONSISTENT`, never as an exact match; edited tiles and grid-aligned crops are flagged. Small or low-contrast edits can go unnoticed. Older `grid-sha256-v1` records (pixel-exact) still verify.
 - **On-Device Recipient Verification**: Built-in GeoCam QR scanner fetches signed metadata from the server and performs complete Layer A & Layer B analysis **locally on the recipient's phone**.
 - **Public Verification Page**: Scanning the QR code with an ordinary smartphone camera opens a clean public page that verifies the digital signature and metadata, clearly prompting users to download GeoCam to inspect their actual received file. Original media is never displayed or downloadable.
 - **Local Ed25519 Hardware-Backed Signing**: The private signing key never leaves Android EncryptedSharedPreferences / secure storage.
@@ -64,3 +64,10 @@ All 30 backend test cases and 13 Flutter client test cases execute cleanly with 
 - [`PRIVACY_ARCHITECTURE.md`](file:///Volumes/Ankush/geocam/PRIVACY_ARCHITECTURE.md): Complete cryptographic specification, manifest formats, threat model, and cropping analysis.
 - [`MIGRATION.md`](file:///Volumes/Ankush/geocam/MIGRATION.md): Operational guide for migrating legacy media and verified deletion scripts.
 - [`migrations/001_add_fingerprint.sql`](file:///Volumes/Ankush/geocam/migrations/001_add_fingerprint.sql): Database schema migration.
+
+## Verification limits
+- `EXACT MATCH` only for a byte-identical file. A resized or recompressed copy can at best be `FILE CHANGED, CONTENT CONSISTENT`, which does not prove the image is unedited; small or low-contrast edits and non-grid-aligned crops are not reliably located, and rotation is not corrected.
+- Specific edit locations are only shown when the comparison is closely aligned; shifted or zoomed copies get a "cannot be reliably located" message instead. Luma-v2 grids are limited to 16x16.
+- A valid signature proves the record is unchanged since signing with the shown key, not who owns the key.
+- "Captured" is the phone's clock; "Registered on server" is when the server first received the record. For photos taken with a GPS fix, the page also shows how far the phone clock was from GPS time.
+- The photo you check is processed on your phone and not uploaded. See `PRIVACY_ARCHITECTURE.md` for what the server exposes.
