@@ -39,6 +39,18 @@ android {
 
 flutter { source '../..' }
 
+dependencies {
+    // CameraTuningBridge reaches the camera owned by the `camera` plugin. Plugin dependencies are
+    // not on the app's compile classpath, so CameraX is declared here at the version Gradle already
+    // resolves for the app (mobile_scanner requires 1.6.1, camera_android_camerax 1.5.3).
+    implementation "androidx.camera:camera-camera2:1.6.1"
+    implementation "androidx.camera:camera-lifecycle:1.6.1"
+    // The bridge uses CameraX's ListenableFuture results. Gradle resolves the standalone
+    // `listenablefuture` artifact to an empty placeholder when other libraries pull in Guava, so the
+    // class must come from Guava itself ("Cannot access class 'ListenableFuture'" otherwise).
+    implementation "com.google.guava:guava:33.4.0-android"
+}
+
 tasks.configureEach { task ->
     if (task.name.contains("Resource") || task.name.contains("Assets") || task.name.contains("Bundle")) {
         task.doFirst {

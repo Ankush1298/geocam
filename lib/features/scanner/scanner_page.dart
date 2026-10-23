@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../services/time_format.dart';
 import '../../core/theme/app_theme.dart';
 import '../../models/geo_record.dart';
 import '../../services/history_store.dart';
@@ -299,7 +300,7 @@ class _ScannerPageState extends State<ScannerPage> {
                       style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13, fontFamily: 'monospace'),
                     ),
                     subtitle: Text(
-                      '${r.timestamp.toLocal().toString().split('.').first} • ${r.address.isEmpty ? "No address" : r.address}',
+                      '${formatIst(r.timestamp)} • ${r.address.isEmpty ? "No address" : r.address}',
                       style: const TextStyle(fontSize: 11, color: Colors.white54),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,

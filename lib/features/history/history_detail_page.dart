@@ -3,9 +3,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
+import '../../services/time_format.dart';
 import '../../download_helper/download_helper.dart';
 import '../../models/geo_record.dart';
 import '../../services/hash_service.dart';
+import '../../services/photo_processor.dart';
+import 'widgets/verification_link_tile.dart';
 
 class HistoryDetailPage extends StatefulWidget {
   final List<GeoRecord> records;
@@ -273,11 +276,13 @@ class _HistoryDetailItemState extends State<HistoryDetailItem> {
         if (record.longitude != null) Text('Longitude: ${record.longitude!.toStringAsFixed(6)}'),
         if (record.accuracy != null) Text('Accuracy: ±${record.accuracy!.round()} m'),
         if (record.altitude != null) Text('Altitude: ${record.altitude!.toStringAsFixed(1)} m'),
-        Text('Captured: ${record.timestamp.toLocal()}'),
+        Text('Captured: ${formatIst(record.timestamp)}'),
         if (record.address.isNotEmpty) ...[
           const SizedBox(height: 8),
           Text(record.address, style: const TextStyle(color: Colors.white70)),
         ],
+        // The same link the photo's QR code opens.
+        VerificationLinkTile(url: PhotoProcessor.qrPayloadFor(address: record.address, timestamp: record.timestamp, recordId: record.id)),
         const SizedBox(height: 18),
         OutlinedButton.icon(
           onPressed: widget.onExport,

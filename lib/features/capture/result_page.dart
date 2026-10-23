@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../../services/time_format.dart';
 import '../../core/theme/app_theme.dart';
 import '../../download_helper/download_helper.dart';
 import '../camera/camera_controller.dart';
@@ -79,7 +80,7 @@ class _ResultPageState extends State<ResultPage> {
                 Text('📍 ${result.position!.latitude.toStringAsFixed(6)}, ${result.position!.longitude.toStringAsFixed(6)}  •  ±${result.position!.accuracy.round()} m'),
               if (result.address.isNotEmpty)
                 Text(result.address, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70)),
-              Text('🕐 ${result.timestamp.toLocal()}', style: const TextStyle(color: Colors.white70)),
+              Text('🕐 ${formatIst(result.timestamp)}', style: const TextStyle(color: Colors.white70)),
               const SizedBox(height: 12),
               Row(children: [
                 Expanded(child: OutlinedButton.icon(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.refresh), label: const Text('Retake'))),
