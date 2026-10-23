@@ -11,6 +11,7 @@ import '../core/theme/app_theme.dart';
 import '../models/stamp_settings.dart';
 import '../models/camera_frame.dart';
 import 'sync_service.dart';
+import 'time_format.dart';
 
 class PhotoProcessor {
   Future<Uint8List> stamp({
@@ -253,13 +254,7 @@ class PhotoProcessor {
     return '${SyncService.verificationBaseUrl}/';
   }
 
-  static String formatDateTime(DateTime t) {
-    t = t.toLocal(); // captures are stored as UTC; the stamp must show the phone's local wall time
-    final day = t.day.toString().padLeft(2, '0');
-    final month = t.month.toString().padLeft(2, '0');
-    final hour = t.hour.toString().padLeft(2, '0');
-    final minute = t.minute.toString().padLeft(2, '0');
-    final second = t.second.toString().padLeft(2, '0');
-    return '$day/$month/${t.year}  $hour:$minute:$second';
-  }
+  /// The stamp shows Indian Standard Time, the same as every screen in the app (see time_format.dart).
+  /// It is picture text only: the signed timestamp stays in UTC.
+  static String formatDateTime(DateTime t) => formatIst(t);
 }

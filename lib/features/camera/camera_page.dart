@@ -6,11 +6,14 @@ import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../models/stamp_settings.dart';
 import '../../models/camera_frame.dart';
+import '../../services/presentation_exposure.dart';
 import '../capture/result_page.dart';
 import '../history/history_page.dart';
 import '../scanner/scanner_page.dart';
 import '../settings/settings_sheet.dart';
 import 'camera_controller.dart';
+import 'widgets/camera_controls_sheet.dart';
+import 'widgets/camera_overlays.dart';
 import 'widgets/location_status_card.dart';
 
 class CameraPage extends StatefulWidget {
@@ -21,7 +24,7 @@ class CameraPage extends StatefulWidget {
   State<CameraPage> createState() => _CameraPageState();
 }
 
-class _CameraPageState extends State<CameraPage> {
+class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   late final GeoCameraController controller;
   bool _videoMode = false;
   Timer? _recordTimer;
@@ -41,10 +44,44 @@ class _CameraPageState extends State<CameraPage> {
     controller = GeoCameraController(cameras: widget.cameras)
       ..addListener(_onControllerChanged);
     controller.initialize();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  bool _wasBackgrounded = false;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        if (_wasBackgrounded) {
+          _wasBackgrounded = false;
+          controller.onAppResumed();
+        }
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        _wasBackgrounded = true;
+        controller.onAppPaused();
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  /// Pages pushed over the camera pause preview analysis; settings are re-applied on return.
+  /// [releasesCamera]: the page opens the camera itself, so manual settings are lifted meanwhile.
+  Future<T?> _pushOverCamera<T>(Route<T> route, {bool releasesCamera = false}) async {
+    await controller.setCovered(true, releasesCamera: releasesCamera);
+    try {
+      if (!mounted) return null;
+      return await Navigator.of(context).push(route);
+    } finally {
+      await controller.setCovered(false);
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _recordTimer?.cancel();
     _holdStartTimer?.cancel();
     controller
@@ -90,9 +127,7 @@ class _CameraPageState extends State<CameraPage> {
       screenAspect: size.width / size.height,
     );
     if (!mounted || result == null) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => ResultPage(result: result)),
-    );
+    await _pushOverCamera(MaterialPageRoute<void>(builder: (_) => ResultPage(result: result)));
   }
 
   Future<bool> _confirmCapture(String title, String content) async {
@@ -315,8 +350,32 @@ class _CameraPageState extends State<CameraPage> {
     if (result != null) await controller.saveSettings(result);
   }
 
-  void _openHistory() => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HistoryPage()));
-  void _openScanner() => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ScannerPage()));
+  void _openHistory() => _pushOverCamera(MaterialPageRoute<void>(builder: (_) => const HistoryPage()));
+  void _openScanner() =>
+      _pushOverCamera(MaterialPageRoute<void>(builder: (_) => const ScannerPage()), releasesCamera: true);
+
+  void _openCameraControls() => showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: AppTheme.panel,
+        barrierColor: Colors.black26,
+        builder: (_) => CameraControlsSheet(controller: controller),
+      );
+
+  void _setVideoMode(bool video) {
+    setState(() => _videoMode = video);
+    controller.setVideoMode(video);
+  }
+
+  void _onPreviewTapUp(Offset local, Size size, {bool lock = false}) {
+    if (size.isEmpty) return;
+    controller.onPreviewTap(
+      (local.dx / size.width).clamp(0.0, 1.0),
+      (local.dy / size.height).clamp(0.0, 1.0),
+      lock: lock,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -349,7 +408,30 @@ class _CameraPageState extends State<CameraPage> {
                               child: SizedBox(
                                 width: constraints.maxWidth,
                                 height: constraints.maxWidth / camAspect,
-                                child: CameraPreview(c),
+                                // The overlay and the tap layer cover the whole, un-cropped preview
+                                // surface, so tap coordinates are what the camera expects.
+                                child: Stack(fit: StackFit.expand, children: [
+                                  CameraPreview(c),
+                                  Builder(builder: (context) {
+                                    final surface = Size(constraints.maxWidth, constraints.maxWidth / camAspect);
+                                    final m = controller.presentationMode ? controller.lastMeasurement : null;
+                                    return GestureDetector(
+                                      behavior: HitTestBehavior.translucent,
+                                      onTapUp: (d) => _onPreviewTapUp(d.localPosition, surface),
+                                      onLongPressStart: (d) => _onPreviewTapUp(d.localPosition, surface, lock: true),
+                                      child: CustomPaint(
+                                        painter: PreviewOverlayPainter(
+                                          marker: controller.focusMarker,
+                                          presenterMark: controller.presentationMode ? controller.presenterMark : null,
+                                          slideMark: controller.presentationMode ? controller.slideMark : null,
+                                          detectedFace: m?.presenter?.source == RegionSource.detectedFace ? m!.presenter : null,
+                                          estimatedSlide: m?.slide?.source == RegionSource.estimatedScreen ? m!.slide : null,
+                                          geometry: controller.lastGeometry,
+                                        ),
+                                      ),
+                                    );
+                                  }),
+                                ]),
                               ),
                             ),
                           ),
@@ -391,10 +473,48 @@ class _CameraPageState extends State<CameraPage> {
                 ),
                 const Spacer(),
                 _TopButton(icon: Icons.qr_code_scanner, tooltip: 'Scan / Verify QR', onPressed: _openScanner),
-                _TopButton(icon: Icons.photo_library_outlined, tooltip: 'Gallery', onPressed: _openHistory),
                 _TopButton(icon: Icons.tune, tooltip: 'Stamp settings', onPressed: _openSettings),
                 _TopButton(icon: controller.flashOn ? Icons.flash_on : Icons.flash_off, tooltip: 'Flash', onPressed: ready ? controller.toggleFlash : null),
                 _TopButton(icon: Icons.crop_free, tooltip: 'Frame', onPressed: ready ? _openFramePicker : null),
+              ]),
+            ),
+          if (!recording && ready)
+            Positioned(
+              top: 70,
+              left: 12,
+              right: 70,
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  GestureDetector(
+                    onTap: _openCameraControls,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                      margin: const EdgeInsets.only(right: 6),
+                      decoration: BoxDecoration(color: Colors.black.withValues(alpha: .6), borderRadius: BorderRadius.circular(14)),
+                      child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.camera_outlined, size: 14),
+                        SizedBox(width: 4),
+                        Text('Controls', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+                      ]),
+                    ),
+                  ),
+                  Expanded(child: TuningStatusChips(controller: controller, onOpen: _openCameraControls)),
+                ]),
+                if (controller.armedMark != MarkTarget.none)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: InputChip(
+                      label: Text(controller.armedMark == MarkTarget.presenter
+                          ? 'Tap the presenter on the preview'
+                          : 'Tap the slide on the preview'),
+                      onDeleted: () => controller.armMark(MarkTarget.none),
+                    ),
+                  )
+                else if (controller.sceneWarnings.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: SceneWarningBanner(warnings: controller.sceneWarnings),
+                  ),
               ]),
             ),
           if (!recording)
@@ -468,8 +588,8 @@ class _CameraPageState extends State<CameraPage> {
                   padding: const EdgeInsets.all(4),
                   decoration: BoxDecoration(color: Colors.black.withValues(alpha: .58), borderRadius: BorderRadius.circular(24)),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    _ModeButton(label: 'PHOTO', active: !_videoMode, onTap: recording ? null : () => setState(() => _videoMode = false)),
-                    _ModeButton(label: 'VIDEO', active: _videoMode, onTap: recording ? null : () => setState(() => _videoMode = true)),
+                    _ModeButton(label: 'PHOTO', active: !_videoMode, onTap: recording ? null : () => _setVideoMode(false)),
+                    _ModeButton(label: 'VIDEO', active: _videoMode, onTap: recording ? null : () => _setVideoMode(true)),
                   ]),
                 ),
                 const SizedBox(height: 10),

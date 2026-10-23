@@ -47,7 +47,10 @@ void main() {
 
   testWidgets('shows server registration time, labelled as not the capture time, plus GPS clock check', (t) async {
     await show(t, await signedRecord(registeredAt: '2026-10-06T09:00:00.123456Z', gpsOffsetMs: 300000));
-    expect(find.text('2026-10-06T09:00:00.123456Z'), findsOneWidget);
+    // Shown in IST like everywhere else in the app: 09:00:00 UTC is 14:30:00 IST.
+    expect(find.text('06/10/2026 14:30:00 IST'), findsOneWidget);
+    expect(find.text('03/10/2026 21:42:10 IST'), findsOneWidget, reason: 'captured time, also IST');
+    expect(find.text('2026-10-06T09:00:00.123456Z'), findsNothing);
     expect(find.textContaining('Registered on server (not the capture time)'), findsOneWidget);
     expect(find.textContaining('Captured (device clock, not independently verified)'), findsOneWidget);
     expect(find.textContaining('ahead of GPS time by 5 min'), findsOneWidget);
@@ -58,7 +61,9 @@ void main() {
   testWidgets('older record without registeredAt or GPS reference degrades gracefully', (t) async {
     await show(t, await signedRecord());
     expect(find.text('Not recorded (older record)'), findsOneWidget);
-    expect(find.textContaining('No GPS time reference'), findsOneWidget);
+    // No GPS time reference is normal indoors: no row and no error-like text.
+    expect(find.textContaining('Phone clock vs GPS'), findsNothing);
+    expect(find.textContaining('No GPS time reference'), findsNothing);
     expect(find.text('Valid (Ed25519)'), findsOneWidget);
   });
 
@@ -66,6 +71,6 @@ void main() {
     final r = await signedRecord(gpsOffsetMs: 0);
     r['regionFingerprints'] = (r['regionFingerprints'] as String).replaceFirst('"gpsClockOffsetMs":0,', '"gpsClockOffsetMs":999,');
     await show(t, r);
-    expect(find.textContaining('No GPS time reference'), findsOneWidget); // tampered manifest not trusted
+    expect(find.textContaining('Phone clock vs GPS'), findsNothing); // tampered manifest not trusted
   });
 }

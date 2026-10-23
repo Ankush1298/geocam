@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
+import '../../services/time_format.dart';
 import '../../core/theme/app_theme.dart';
 import '../../models/geo_record.dart';
 import '../../services/history_store.dart';
@@ -40,9 +41,7 @@ class _HistoryPageState extends State<HistoryPage> with WidgetsBindingObserver {
     });
   }
 
-  String _date(DateTime d) =>
-      '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} '
-      '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+  String _date(DateTime d) => formatIst(d);
 
   Future<void> _delete(GeoRecord record) async {
     final yes = await showDialog<bool>(

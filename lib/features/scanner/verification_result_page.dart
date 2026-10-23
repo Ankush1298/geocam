@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:file_picker/file_picker.dart';
 
 import 'package:flutter/material.dart';
+import '../../services/time_format.dart';
 import '../../services/hash_service.dart';
 
 import '../../core/theme/app_theme.dart';
@@ -316,7 +317,7 @@ class _VerificationResultPageState extends State<VerificationResultPage> {
                           ),
                         ),
                         title: Text(hr.id, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                        subtitle: Text(hr.timestamp.toLocal().toString().split('.').first, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                        subtitle: Text(formatIst(hr.timestamp), style: const TextStyle(fontSize: 11, color: Colors.white54)),
                         onTap: () {
                           Navigator.of(ctx).pop();
                           _analyzeFile(File(hr.stampedPath));
@@ -790,9 +791,13 @@ class _VerificationResultPageState extends State<VerificationResultPage> {
           ),
           const Divider(height: 20),
           _fieldRow('Record ID', record['id'] ?? '—'),
-          _fieldRow('Captured (device clock, not independently verified)', record['timestamp'] ?? '—'),
-          _fieldRow('Registered on server (not the capture time)', record['registeredAt'] ?? 'Not recorded (older record)'),
-          _fieldRow('Phone clock vs GPS', describeGpsClockOffset(_manifest?.gpsClockOffsetMs)),
+          _fieldRow('Captured (device clock, not independently verified)', formatIstText(record['timestamp'])),
+          _fieldRow('Registered on server (not the capture time)', formatIstText(record['registeredAt'], ifMissing: 'Not recorded (older record)')),
+          // Only shown when this capture recorded a live GPS time reference (it needs a satellite
+          // fix, so photos taken indoors have none). Its absence is normal and says nothing about
+          // the photo, the phone or the signature, so no row is shown rather than an error-like note.
+          if (_manifest?.gpsClockOffsetMs != null)
+            _fieldRow('Phone clock vs GPS', describeGpsClockOffset(_manifest!.gpsClockOffsetMs)),
           _fieldRow('Media Type', record['mediaType'] ?? 'photo'),
           if (record['imageDimensions'] != null)
             _fieldRow('Original Dimensions', record['imageDimensions']),
